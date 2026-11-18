@@ -10,3 +10,18 @@ jobs:
       - name: Syntax and offline checks
         shell: pwsh
         run: ./tests/validate.ps1
+  rust-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustc --version; cargo --version
+      - name: Rust tests
+        run: cargo test
+      - name: Build EXE
+        run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DevSpacePCBridge-Windows
+          path: target/release/DevSpacePCBridge.exe
+          if-no-files-found: error

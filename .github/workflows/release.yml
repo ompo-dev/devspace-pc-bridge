@@ -1,0 +1,23 @@
+name: Release Windows EXE
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Rust application
+        run: cargo test
+      - name: Build EXE
+        run: cargo build --release
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME target/release/DevSpacePCBridge.exe --title "DevSpace PC Bridge $env:GITHUB_REF_NAME" --generate-notes --verify-tag
