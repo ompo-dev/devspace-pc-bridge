@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+auth.json
+config.jsonc
+settings.json
+tailscale.json
+*.log
+logs/
+node_modules/
+.devspace/
+*.pem
+*.key
+*.p12
+*.pfx

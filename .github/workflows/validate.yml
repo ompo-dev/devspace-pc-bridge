@@ -1,0 +1,12 @@
+name: Windows checks
+on:
+  push:
+  pull_request:
+jobs:
+  syntax-and-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and offline checks
+        shell: pwsh
+        run: ./tests/validate.ps1
