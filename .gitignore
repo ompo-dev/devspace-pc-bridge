@@ -8,6 +8,8 @@ tailscale.json
 *.log
 logs/
 node_modules/
+dist/
+target/
 .devspace/
 *.pem
 *.key
