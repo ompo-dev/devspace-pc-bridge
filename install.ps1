@@ -47,7 +47,7 @@ if ($Check) {
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $admin = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Abra o PowerShell como Administrador e execute novamente .\install.ps1'
+    Write-Warning 'Sem privilegios de administrador. Pacotes e Tailscale podem solicitar confirmacao UAC.'
 }
 $root = (Resolve-Path -LiteralPath $WorkspacesRoot -ErrorAction Stop).Path
 if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "Raiz invalida: $root" }
