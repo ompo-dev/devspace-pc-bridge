@@ -120,6 +120,21 @@ pub fn start_task(task: Task, root: PathBuf, tx: Sender<TaskEvent>) {
 }
 
 fn execute(task: Task, root: PathBuf, tx: &Sender<TaskEvent>) -> Result<(), String> {
+    if matches!(task, Task::LinkCodexMcp | Task::LinkClaudeMcp) {
+        let expected = storage::devspace_mcp_url().ok_or("MCP DevSpace nao configurado")?;
+        let client = if matches!(task, Task::LinkCodexMcp) { "codex" } else { "claude" };
+        let mut check = hidden_command(client);
+        check.args(["mcp", "get", "devspace"]);
+        if let Ok(existing) = check.output() {
+            if existing.status.success() {
+                if String::from_utf8_lossy(&existing.stdout).contains(&expected) {
+                    let _ = tx.send(TaskEvent::Line("MCP DevSpace ja esta registrado corretamente.".into()));
+                    return Ok(());
+                }
+                return Err("Ja existe um MCP chamado devspace apontando para outra URL. Nao substituido.".into());
+            }
+        }
+    }
     let command = match task {
         Task::InstallBridge | Task::Diagnose => {
             let path = bundled_scripts()?;

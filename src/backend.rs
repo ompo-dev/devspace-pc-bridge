@@ -80,7 +80,7 @@ fn cli_codex(settings: &Settings, tx: &Sender<WorkerEvent>) -> Result<(), String
     }
     let mut command = command_hidden("codex");
     if let Some(session) = &settings.codex_session_id {
-        command.args(["exec", "resume", "--json"]);
+        command.args(["exec", "resume", "--json", "--skip-git-repo-check"]);
         command.arg("-c").arg(format!(
             "sandbox_mode=\"{}\"",
             if settings.allow_edits { "workspace-write" } else { "read-only" }
