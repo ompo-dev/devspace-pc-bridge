@@ -24,6 +24,7 @@ pub enum Task {
     LinkCodexMcp,
     LinkClaudeMcp,
     AuthCodexMcp,
+    AuthClaudeMcp,
 }
 
 impl Task {
@@ -38,11 +39,13 @@ impl Task {
             Self::LinkCodexMcp => "Registrando DevSpace no Codex",
             Self::LinkClaudeMcp => "Registrando DevSpace no Claude Code",
             Self::AuthCodexMcp => "Autorizando DevSpace MCP no Codex",
+            Self::AuthClaudeMcp => "Autorizando DevSpace MCP no Claude Code",
         }
     }
 }
 
 pub enum TaskEvent {
+    ProcessStarted(u32),
     Line(String),
     Finished(Result<(), String>),
 }
@@ -74,6 +77,7 @@ fn hidden_command(name: &str) -> Command {
 fn run_process(mut command: Command, tx: &Sender<TaskEvent>) -> Result<(), String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
     let mut child = command.spawn().map_err(|error| format!("Falha ao iniciar: {error}"))?;
+    let _ = tx.send(TaskEvent::ProcessStarted(child.id()));
     let stdout = child.stdout.take().ok_or("stdout indisponivel")?;
     let stderr = child.stderr.take().ok_or("stderr indisponivel")?;
 
@@ -147,7 +151,7 @@ fn execute(task: Task, root: PathBuf, tx: &Sender<TaskEvent>) -> Result<(), Stri
             command.args(["auth", "login"]);
             command
         }
-        Task::LinkCodexMcp | Task::LinkClaudeMcp | Task::AuthCodexMcp => {
+        Task::LinkCodexMcp | Task::LinkClaudeMcp | Task::AuthCodexMcp | Task::AuthClaudeMcp => {
             let url = storage::devspace_mcp_url()
                 .ok_or("DevSpace ainda nao foi configurado. Configure primeiro.")?;
             if matches!(task, Task::LinkCodexMcp) {
@@ -156,6 +160,10 @@ fn execute(task: Task, root: PathBuf, tx: &Sender<TaskEvent>) -> Result<(), Stri
                 command
             } else if matches!(task, Task::AuthCodexMcp) {
                 let mut command = hidden_command("codex");
+                command.args(["mcp", "login", "devspace", "--oauth-client-registration", "DCR"]);
+                command
+            } else if matches!(task, Task::AuthClaudeMcp) {
+                let mut command = hidden_command("claude");
                 command.args(["mcp", "login", "devspace"]);
                 command
             } else {

@@ -25,6 +25,7 @@ use std::{
 };
 use storage::{Message, Provider, Settings};
 use zeroize::Zeroize;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 
 const SETUP_ITEMS: &[(&str, Option<Task>)] = &[
     ("Configurar DevSpace + Tailscale", Some(Task::InstallBridge)),
@@ -36,6 +37,7 @@ const SETUP_ITEMS: &[(&str, Option<Task>)] = &[
     ("Conectar MCP ao Codex", Some(Task::LinkCodexMcp)),
     ("Autorizar OAuth MCP do Codex", Some(Task::AuthCodexMcp)),
     ("Conectar MCP ao Claude", Some(Task::LinkClaudeMcp)),
+    ("Autorizar OAuth MCP do Claude", Some(Task::AuthClaudeMcp)),
     ("Copiar URL MCP", None),
     ("Abrir painel DevSpace", None),
     ("Testar health HTTPS", None),
@@ -77,6 +79,7 @@ struct App {
     page: Page,
     editor: Edit,
     input: String,
+    draft: String,
     feedback: String,
     logs: VecDeque<String>,
     setup_index: usize,
@@ -86,6 +89,9 @@ struct App {
     log_scroll: u16,
     busy_chat: bool,
     busy_setup: bool,
+    chat_pid: Option<u32>,
+    setup_pid: Option<u32>,
+    cancel_chat: Arc<AtomicBool>,
     chat_tx: Sender<WorkerEvent>,
     chat_rx: Receiver<WorkerEvent>,
     task_tx: Sender<TaskEvent>,
@@ -107,6 +113,7 @@ impl App {
             page: Page::Chat,
             editor: Edit::None,
             input: String::new(),
+            draft: String::new(),
             feedback: "Pronto. Enter envia mensagem | Tab alterna telas | F1 ajuda".into(),
             logs: VecDeque::new(),
             setup_index: 0,
@@ -116,6 +123,9 @@ impl App {
             log_scroll: 0,
             busy_chat: false,
             busy_setup: false,
+            chat_pid: None,
+            setup_pid: None,
+            cancel_chat: Arc::new(AtomicBool::new(false)),
             chat_tx,
             chat_rx,
             task_tx,
@@ -143,6 +153,7 @@ impl App {
     fn poll_workers(&mut self) {
         while let Ok(event) = self.chat_rx.try_recv() {
             match event {
+                WorkerEvent::ProcessStarted(pid) => self.chat_pid = Some(pid),
                 WorkerEvent::Chunk(delta) => {
                     if let Some(message) = self.settings.messages.last_mut() {
                         if message.role == "assistant" {
@@ -159,6 +170,7 @@ impl App {
                 },
                 WorkerEvent::Finished(result) => {
                     self.busy_chat = false;
+                    self.chat_pid = None;
                     match result {
                         Ok(()) => self.note("Resposta concluida."),
                         Err(error) => {
@@ -176,9 +188,11 @@ impl App {
         }
         while let Ok(event) = self.task_rx.try_recv() {
             match event {
+                TaskEvent::ProcessStarted(pid) => self.setup_pid = Some(pid),
                 TaskEvent::Line(line) => self.note(line),
                 TaskEvent::Finished(result) => {
                     self.busy_setup = false;
+                    self.setup_pid = None;
                     self.note(match result {
                         Ok(()) => "Operacao concluida com sucesso.".to_owned(),
                         Err(error) => format!("Falha: {error}. Confira o log."),
@@ -214,7 +228,8 @@ impl App {
         self.page = Page::Chat;
         self.note(format!("Consultando {}...", self.settings.provider.label()));
         self.save();
-        spawn_chat(self.settings.clone(), self.chat_tx.clone());
+        self.cancel_chat = Arc::new(AtomicBool::new(false));
+        spawn_chat(self.settings.clone(), self.chat_tx.clone(), self.cancel_chat.clone());
     }
 
     fn slash_command(&mut self, input: &str) {
@@ -288,6 +303,25 @@ impl App {
         setup::start_task(task, self.settings.root.clone(), self.task_tx.clone());
     }
 
+    fn stop_running(&mut self) {
+        if let Some(pid) = self.setup_pid.or(self.chat_pid) {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("taskkill.exe")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .creation_flags(0x0800_0000)
+                    .output();
+            }
+            self.note("Cancelamento solicitado. Se for instalacao, confira o estado do sistema.");
+        } else if self.busy_chat {
+            self.cancel_chat.store(true, Ordering::Relaxed);
+            self.note("Cancelamento do streaming solicitado; pode depender do proximo pacote HTTP.");
+        } else if self.busy_setup {
+            self.note("Aguarde o processo de instalacao iniciar para cancelar.");
+        }
+    }
+
     fn submit_edit(&mut self) {
         let value = self.input.trim().to_owned();
         match self.editor {
@@ -345,9 +379,30 @@ impl App {
             self.input.clear();
         }
         self.editor = Edit::None;
+        self.input = std::mem::take(&mut self.draft);
     }
 
     fn start_edit(&mut self, mode: Edit) {
+        if self.editor == Edit::None && self.page == Page::Providers && mode != Edit::ConfirmWrite {
+            let highlighted = Provider::ALL[self.provider_index];
+            if highlighted != self.settings.provider {
+                self.select_provider();
+                if self.settings.provider != highlighted {
+                    return;
+                }
+            }
+        }
+        if mode == Edit::ApiKey && !self.settings.provider.requires_key() {
+            self.note("Este provedor nao utiliza chave API. Use o login oficial ou Ollama.");
+            return;
+        }
+        if mode == Edit::Endpoint && self.settings.provider.is_agent() {
+            self.note("O agente CLI gerencia sua propria conexao. Nao precisa de endpoint API.");
+            return;
+        }
+        if self.editor == Edit::None {
+            self.draft = std::mem::take(&mut self.input);
+        }
         self.editor = mode;
         self.input = match mode {
             Edit::Root => self.settings.root.to_string_lossy().into_owned(),
@@ -358,6 +413,12 @@ impl App {
     }
 
     fn toggle_write(&mut self) {
+        if self.page == Page::Providers && Provider::ALL[self.provider_index] != self.settings.provider {
+            self.select_provider();
+            if Provider::ALL[self.provider_index] != self.settings.provider {
+                return;
+            }
+        }
         if !self.settings.provider.is_agent() {
             self.note("Modo de edicao pertence aos agentes CLI, nao ao chat API.");
             return;
@@ -390,15 +451,15 @@ impl App {
             self.start(task);
         } else {
             match selected {
-                9 => self.note(match setup::copy_url() {
+                10 => self.note(match setup::copy_url() {
                     Ok(url) => format!("MCP copiado: {url}"),
                     Err(err) => err,
                 }),
-                10 => self.note(match setup::open_panel() {
+                11 => self.note(match setup::open_panel() {
                     Ok(()) => "Painel aberto no navegador.".into(),
                     Err(err) => err,
                 }),
-                11 => {
+                12 => {
                     self.note("Verificando health publico...");
                     let tx = self.task_tx.clone();
                     self.busy_setup = true;
@@ -426,6 +487,7 @@ impl App {
                     }
                     return true;
                 }
+                KeyCode::Char('x') => self.stop_running(),
                 KeyCode::Char('n') => {
                     if !self.busy_chat {
                         self.settings.new_chat();
@@ -450,7 +512,7 @@ impl App {
                         self.input.zeroize();
                     }
                     self.editor = Edit::None;
-                    self.input.clear();
+                    self.input = std::mem::take(&mut self.draft);
                     self.note("Edicao cancelada.");
                 }
                 KeyCode::Backspace => {
@@ -730,6 +792,7 @@ fn draw_help(frame: &mut Frame, bounds: Rect) {
         "Ctrl+N           Nova conversa (nao apaga chats antigos do Codex/Claude).",
         "Comandos /help, /new, /model, /provider, /cd, /mcp, /status, /read, /write",
         "Ctrl+Q           Sair (requer tarefas concluidas).",
+        "Ctrl+X           Cancelar comando CLI/instalador em execucao.",
         "F1              Ajuda",
         "Esc             Voltar ao Chat / cancelar edicao",
         "Setas            Escolher provedor/acao ou navegar na conversa",

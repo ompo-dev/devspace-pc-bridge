@@ -228,7 +228,7 @@ pub fn devspace_mcp_url() -> Option<String> {
         if let Some(hostname) = fs::read_to_string(path)
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|value| value.get("hostname").and_then(str::as_str).map(str::to_owned))
+            .and_then(|value| value.get("hostname").and_then(|host| host.as_str()).map(str::to_owned))
         {
             if validate_ts_host(&hostname) {
                 return Some(format!("https://{hostname}/mcp"));

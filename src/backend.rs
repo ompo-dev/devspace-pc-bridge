@@ -4,25 +4,30 @@ use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Command, Stdio},
-    sync::mpsc::Sender,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+        Arc,
+    },
     thread,
     time::Duration,
 };
 
 #[derive(Debug)]
 pub enum WorkerEvent {
+    ProcessStarted(u32),
     Chunk(String),
     Info(String),
     Session(Provider, String),
     Finished(Result<(), String>),
 }
 
-pub fn spawn_chat(settings: Settings, sender: Sender<WorkerEvent>) {
+pub fn spawn_chat(settings: Settings, sender: Sender<WorkerEvent>, cancelled: Arc<AtomicBool>) {
     thread::spawn(move || {
         let result = match settings.provider {
             Provider::Codex => cli_codex(&settings, &sender),
             Provider::ClaudeCode => cli_claude(&settings, &sender),
-            _ => http_chat(&settings, &sender),
+            _ => http_chat(&settings, &sender, &cancelled),
         };
         let _ = sender.send(WorkerEvent::Finished(result));
     });
@@ -177,6 +182,7 @@ fn run_cli(
 ) -> Result<(), String> {
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|error| format!("Nao foi possivel iniciar CLI: {error}"))?;
+    let _ = tx.send(WorkerEvent::ProcessStarted(child.id()));
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(input.as_bytes())
@@ -209,7 +215,10 @@ fn run_cli(
     Ok(())
 }
 
-fn http_chat(settings: &Settings, tx: &Sender<WorkerEvent>) -> Result<(), String> {
+fn http_chat(settings: &Settings, tx: &Sender<WorkerEvent>, cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Cancelado antes de enviar a solicitacao".into());
+    }
     let provider = settings.provider;
     let key = if provider.requires_key() {
         crate::storage::load_key(provider)
@@ -279,6 +288,9 @@ fn http_chat(settings: &Settings, tx: &Sender<WorkerEvent>) -> Result<(), String
     let reader = BufReader::new(response);
     let mut saw_chunk = false;
     for line in reader.lines() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Resposta cancelada".into());
+        }
         let line = line.map_err(|error| format!("Streaming interrompido: {error}"))?;
         let raw = if provider == Provider::Ollama {
             line.trim()
@@ -327,6 +339,7 @@ fn extract_stream_text<'a>(provider: Provider, value: &'a Value) -> Option<&'a s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     #[test]
     fn openai_and_ollama_chunks() {
@@ -366,5 +379,35 @@ mod tests {
         let source = include_str!("backend.rs");
         assert!(!source.contains(concat!("dangerously-", "bypass-approvals-and-sandbox")));
         assert!(!source.contains(concat!("dangerously-", "skip-permissions")));
+    }
+
+    #[test]
+    fn local_ollama_stream_is_read_incrementally() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 8192];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "{\"message\":{\"content\":\"ola\"}}\n{\"message\":{\"content\":\" mundo\"},\"done\":true}\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let mut settings = Settings::default();
+        settings.switch_provider(Provider::Ollama);
+        settings.endpoint = format!("http://127.0.0.1:{port}");
+        settings.messages.push(Message { role: "user".into(), content: "oi".into() });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        assert!(http_chat(&settings, &sender, &AtomicBool::new(false)).is_ok());
+        let chunks = receiver.try_iter().filter_map(|event| match event {
+            WorkerEvent::Chunk(text) => Some(text),
+            _ => None,
+        }).collect::<String>();
+        assert_eq!(chunks, "ola mundo");
+        server.join().unwrap();
     }
 }

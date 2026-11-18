@@ -6,20 +6,30 @@ jobs:
   syntax-and-tests:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Syntax and offline checks
         shell: pwsh
         run: ./tests/validate.ps1
   rust-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
       - name: Rust toolchain
         run: rustc --version; cargo --version
       - name: Rust tests
         run: cargo test
       - name: Build EXE
         run: cargo build --release
+      - name: Smoke test EXE
+        run: |
+          .\target\release\DevSpacePCBridge.exe --version
+          .\target\release\DevSpacePCBridge.exe --doctor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Rust-Lockfile
+          path: Cargo.lock
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: DevSpacePCBridge-Windows
