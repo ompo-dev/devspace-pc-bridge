@@ -59,7 +59,13 @@ $version = [version]((& node.exe --version).TrimStart('v'))
 if ($version -lt [version]'22.19.0' -or $version.Major -ge 27) {
     throw "Node $version nao suportado pelo DevSpace (requer >=22.19 e <27). Atualize para LTS."
 }
-if (-not (Find-Tailscale)) { Ensure-Package 'tailscale.exe' 'Tailscale.Tailscale' }
+if (-not (Find-Tailscale)) {
+    if ($SkipPackageInstall) { throw 'Tailscale ausente. Instale Tailscale.Tailscale e repita.' }
+    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) { throw 'winget ausente. Instale App Installer e repita.' }
+    & winget.exe install --exact --id 'Tailscale.Tailscale' --accept-source-agreements --accept-package-agreements --silent
+    if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar Tailscale.' }
+    Refresh-Path
+}
 $tailscale = Find-Tailscale
 if (-not $tailscale) { throw 'Tailscale nao encontrado; abra novo terminal e repita.' }
 if (-not (Get-Command devspace.cmd -ErrorAction SilentlyContinue)) {

@@ -13,11 +13,11 @@ use std::{
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
-    DefaultTerminal, Frame,
+    Frame,
 };
 
 const ACTIONS: &[&str] = &[
@@ -81,7 +81,7 @@ impl App {
         let devspace = command_exists("devspace", "--version");
         let tailscale = tailscale_executable().is_some();
         self.status = format!(
-            "DevSpace local       {}\nNode.js              {}\nDevSpace CLI         {}\nTailscale            {}\nConfiguracao         {}\n\nMCP publico:\n{}",
+            "Porta local 7676     {}\nNode.js              {}\nDevSpace CLI         {}\nTailscale            {}\nConfiguracao         {}\n\nMCP publico:\n{}",
             indicator(local),
             indicator(node),
             indicator(devspace),
@@ -206,16 +206,22 @@ fn draw(frame: &mut Frame, app: &App) {
     );
 
     let body = match app.page {
-        Page::Home => Text::from(vec![
-            Line::styled(" CONEXAO", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Line::raw(""),
-            Line::raw(app.status.as_str()),
-            Line::raw(""),
-            Line::styled(" PASTA DE PROJETOS", Style::default().fg(Color::Cyan)),
-            Line::raw(app.root.as_str()),
-            Line::raw(""),
-            Line::styled(" Autorizacao OAuth e Tailscale requerem sua aprovacao.", Style::default().fg(Color::DarkGray)),
-        ]),
+        Page::Home => {
+            let mut lines = vec![
+                Line::styled(" CONEXAO", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Line::raw(""),
+            ];
+            lines.extend(app.status.lines().map(|line| Line::raw(line.to_owned())));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(" PASTA DE PROJETOS", Style::default().fg(Color::Cyan)));
+            lines.push(Line::raw(app.root.as_str()));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                " OAuth e Tailscale requerem sua aprovacao.",
+                Style::default().fg(Color::DarkGray),
+            ));
+            Text::from(lines)
+        }
         Page::EditRoot => Text::from(vec![
             Line::styled(" ESCOLHA A RAIZ DE PROJETOS", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Line::raw(""),
@@ -368,12 +374,16 @@ fn ui_loop() -> Result<(), Box<dyn Error>> {
                 }
                 Some(Action::CopyUrl) => {
                     if let Some(url) = app.mcp_url() {
-                        app.feedback = match Command::new("powershell.exe")
-                            .args(["-NoProfile", "-Command", "Set-Clipboard -Value $args[0]", url.as_str()])
-                            .output()
+                        app.feedback = match Command::new("clip.exe")
+                            .stdin(std::process::Stdio::piped())
+                            .spawn()
                         {
-                            Ok(output) if output.status.success() => "URL do MCP copiada.".into(),
-                            _ => format!("Copie manualmente: {url}"),
+                            Ok(mut child) => {
+                                let wrote = child.stdin.take().map(|mut input| input.write_all(url.as_bytes()).is_ok()).unwrap_or(false);
+                                let success = child.wait().map(|status| status.success()).unwrap_or(false);
+                                if wrote && success { "URL do MCP copiada.".into() } else { format!("Copie manualmente: {url}") }
+                            }
+                            Err(_) => format!("Copie manualmente: {url}"),
                         };
                     } else {
                         app.feedback = "Configure o DevSpace primeiro.".into();
@@ -389,11 +399,7 @@ fn ui_loop() -> Result<(), Box<dyn Error>> {
 }
 
 fn bundle_dir() -> PathBuf {
-    env::var_os("PROGRAMDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir)
-        .join("DevSpacePCBridge")
-        .join("setup")
+    env::temp_dir().join(format!("DevSpacePCBridge-{}", std::process::id()))
 }
 
 fn write_bundle() -> io::Result<PathBuf> {
@@ -433,7 +439,7 @@ fn request_install(root: &str) -> Result<(), Box<dyn Error>> {
     let exe = env::current_exe()?;
     let root_hex = hex_encode(root);
     let script = format!(
-        "Start-Process -FilePath '{}' -ArgumentList '--install-hex','{}' -Verb RunAs -Wait",
+        "$p = Start-Process -FilePath '{}' -ArgumentList @('--install-hex','{}') -Verb RunAs -PassThru -Wait; exit $p.ExitCode",
         ps_quote(&exe.to_string_lossy()),
         root_hex
     );
@@ -461,6 +467,7 @@ fn execute_installer(root: &str) -> Result<(), Box<dyn Error>> {
         .arg(base.join("install.ps1"))
         .args(["-WorkspacesRoot", root])
         .status()?;
+    let _ = fs::remove_dir_all(&base);
     println!("\nInstalador finalizado com codigo: {status}");
     println!("Pressione Enter para voltar ao aplicativo...");
     let _ = io::stdin().read_line(&mut String::new());
@@ -477,6 +484,7 @@ fn run_diagnostics() -> Result<(), Box<dyn Error>> {
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(base.join("scripts").join("doctor.ps1"))
         .status()?;
+    let _ = fs::remove_dir_all(&base);
     println!("\nPressione Enter para voltar...");
     let _ = io::stdin().read_line(&mut String::new());
     if !status.success() {
