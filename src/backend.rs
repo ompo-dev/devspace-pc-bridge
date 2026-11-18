@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn no_bypass_flags() {
         let source = include_str!("backend.rs");
-        assert!(!source.contains("dangerously-bypass-approvals-and-sandbox"));
-        assert!(!source.contains("dangerously-skip-permissions"));
+        assert!(!source.contains(concat!("dangerously-", "bypass-approvals-and-sandbox")));
+        assert!(!source.contains(concat!("dangerously-", "skip-permissions")));
     }
 }

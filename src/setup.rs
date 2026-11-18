@@ -1,7 +1,7 @@
 use crate::storage;
 use std::{
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader},
     path::PathBuf,
     process::{Command, Stdio},
     sync::mpsc::Sender,

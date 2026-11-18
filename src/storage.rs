@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     env, fs, io,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +83,16 @@ pub struct Message {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderState {
+    pub model: String,
+    pub endpoint: String,
+    pub messages: Vec<Message>,
+    pub codex_session_id: Option<String>,
+    pub claude_session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -93,6 +104,7 @@ pub struct Settings {
     pub messages: Vec<Message>,
     pub codex_session_id: Option<String>,
     pub claude_session_id: Option<String>,
+    pub previous_providers: BTreeMap<String, ProviderState>,
 }
 
 impl Default for Settings {
@@ -106,6 +118,7 @@ impl Default for Settings {
             messages: Vec::new(),
             codex_session_id: None,
             claude_session_id: None,
+            previous_providers: BTreeMap::new(),
         }
     }
 }
@@ -148,13 +161,24 @@ impl Settings {
 
     pub fn switch_provider(&mut self, next: Provider) {
         if self.provider != next {
+            self.previous_providers.insert(
+                self.provider.id().to_owned(),
+                ProviderState {
+                    model: self.model.clone(),
+                    endpoint: self.endpoint.clone(),
+                    messages: self.messages.clone(),
+                    codex_session_id: self.codex_session_id.clone(),
+                    claude_session_id: self.claude_session_id.clone(),
+                },
+            );
             self.provider = next;
-            self.model.clear();
-            self.endpoint.clear();
             self.allow_edits = false;
-            self.messages.clear();
-            self.codex_session_id = None;
-            self.claude_session_id = None;
+            let previous = self.previous_providers.remove(next.id()).unwrap_or_default();
+            self.model = previous.model;
+            self.endpoint = previous.endpoint;
+            self.messages = previous.messages;
+            self.codex_session_id = previous.codex_session_id;
+            self.claude_session_id = previous.claude_session_id;
         }
     }
 
@@ -199,10 +223,25 @@ pub fn bridge_config_path() -> PathBuf {
 }
 
 pub fn devspace_mcp_url() -> Option<String> {
-    let config: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(bridge_config_path()).ok()?).ok()?;
-    let hostname = config.get("hostname")?.as_str()?;
-    validate_ts_host(hostname).then(|| format!("https://{hostname}/mcp"))
+    let base = home().join(".devspace");
+    for path in [bridge_config_path(), base.join("autostart").join("tailscale.json")] {
+        if let Some(hostname) = fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| value.get("hostname").and_then(str::as_str).map(str::to_owned))
+        {
+            if validate_ts_host(&hostname) {
+                return Some(format!("https://{hostname}/mcp"));
+            }
+        }
+    }
+    // Detect an existing DevSpace installation without rerunning the installer.
+    let config: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(base.join("config.jsonc")).ok()?
+    ).ok()?;
+    let origin = config.get("server")?.get("publicBaseUrl")?.as_str()?;
+    let host = origin.strip_prefix("https://")?.trim_end_matches('/');
+    validate_ts_host(host).then(|| format!("https://{host}/mcp"))
 }
 
 pub fn validate_ts_host(value: &str) -> bool {
@@ -215,10 +254,6 @@ pub fn validate_ts_host(value: &str) -> bool {
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         })
-}
-
-pub fn valid_workspace(path: &Path) -> bool {
-    path.is_dir()
 }
 
 pub fn store_key(provider: Provider, secret: &str) -> Result<(), String> {
@@ -258,6 +293,9 @@ mod tests {
         assert_eq!(s.codex_session_id, None);
         assert_eq!(s.model(), "claude-sonnet-4-5");
         assert!(s.provider.requires_key());
+        s.switch_provider(Provider::Codex);
+        assert_eq!(s.messages[0].content, "hello");
+        assert_eq!(s.codex_session_id.as_deref(), Some("abc"));
     }
 
     #[test]
