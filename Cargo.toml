@@ -1,8 +1,8 @@
 [package]
 name = "devspace-pc-bridge"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "Windows DevSpace MCP setup in a single Rust terminal executable"
+description = "Connect normal ChatGPT and Claude chats to your Windows PC via remote MCP"
 license = "MIT"
 repository = "https://github.com/ompo-dev/devspace-pc-bridge"
 
@@ -15,9 +15,7 @@ crossterm = "0.29"
 ratatui = "0.30.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
-zeroize = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [profile.release]
 lto = "thin"

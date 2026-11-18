@@ -1,105 +1,96 @@
 # DevSpace PC Bridge
 
-**Uma CLI de agentes para Windows: Rust + Ratatui, um executável, uma interface.**
+**ChatGPT e Claude normais, acessando seu Windows via MCP. Sem Codex CLI, Claude Code ou chaves API de modelos.**
 
-Converse com Codex, Claude Code, OpenAI, Anthropic, OpenRouter e Ollama, use seus projetos locais e configure a ponte MCP DevSpace. O aplicativo possui chat, seleção de provedores, configuração, execução de comandos em segundo plano, logs, histórico local e streaming. Todos os menus ficam **dentro da mesma TUI**.
+O **DevSpace PC Bridge** é um aplicativo Windows de terminal, implementado em **Rust + Ratatui**, que ajuda a instalar, configurar, monitorar e conectar um servidor MCP ao ChatGPT e Claude no navegador ou aplicativo.
 
-> Inspirado na experiência do [OpenClaude](https://github.com/Twigpine/openclaude), mas implementado em Rust do zero. **Não copiamos seu código.** O repositório OpenClaude avisa, em LICENSE, que contém material derivado do Claude Code de propriedade da Anthropic; não o redistribuímos.
+O servidor de ferramentas é o [DevSpace](https://github.com/Waishnav/devspace), acessível através de HTTPS com Tailscale Funnel e protegido por autenticação Owner/OAuth. O bridge **não é um modelo de IA, cliente de chat ou editor próprio**.
 
-## Instalar e começar
+## O que acontece
 
-1. Baixe [**DevSpacePCBridge.exe**](https://github.com/ompo-dev/devspace-pc-bridge/releases) para Windows 10/11 e execute-o em um terminal Windows Terminal/PowerShell. **Não é necessário instalar Rust.**
-2. Na aba **Provedores** (Ctrl+P), selecione sua opção. Para **Codex (conta ChatGPT)** ou **Claude Code (conta Claude)**, instale e faça login com as opções da aba **Setup** (Ctrl+S). Para **OpenAI/Anthropic/OpenRouter API**, cadastre sua própria chave com K; ela é armazenada no **Gerenciador de Credenciais do Windows**. Para **Ollama**, instale e execute o servidor e o modelo desejado separadamente.
-3. Opcional: na aba **Setup**, configure DevSpace + Tailscale, registre o MCP no Codex ou Claude Code e conclua a autorização OAuth no navegador. Depois volte ao Chat e envie mensagens com Enter.
+    ChatGPT normal / Claude normal
+                 |
+           MCP remoto HTTPS
+                 |
+        Tailscale Funnel + OAuth
+                 |
+         DevSpace (seu Windows)
+                 |
+       Projetos, arquivos e ferramentas
 
-**O mesmo .exe cuida do restante da experiência.** O DevSpace e os provedores que exigem CLIs próprios são dependências separadas, instaláveis pelo assistente. Autenticação ChatGPT/Claude Code não equivale a uma chave de API; as opções de API exigem faturamento/acesso próprios.
+O modelo continua rodando no ChatGPT/Claude. É o servidor MCP que disponibiliza ferramentas para leitura, operações e modificações **conforme as permissões concedidas**.
 
-### O que cada provedor oferece
+## Instalação
 
-| Provedor | Autenticação | Ferramentas locais |
-|---|---|---|
-| Codex CLI | Login próprio do Codex/ChatGPT | Sim, conforme permissões e sandbox do Codex |
-| Claude Code CLI | Login próprio do Claude Code | Sim, conforme permissões do Claude Code |
-| OpenAI API | Sua chave API | Chat e streaming; sem ferramentas automáticas |
-| Anthropic API | Sua chave API | Chat e streaming; sem ferramentas automáticas |
-| OpenRouter API | Sua chave API | Chat e streaming; sem ferramentas automáticas |
-| Ollama | Servidor local | Chat e streaming; sem ferramentas automáticas |
+1. Baixe **DevSpacePCBridge.exe** na página de [Releases](https://github.com/ompo-dev/devspace-pc-bridge/releases). Abra-o no Windows 10 ou 11; **não é preciso instalar Rust**.
+2. Vá a **Configurar** (Tab ou Ctrl+S), escolha a pasta que os agentes poderão utilizar e inicie a instalação com **I**. Confirme digitando **PUBLICAR** — o Funnel disponibiliza um endereço HTTPS na internet.
+3. Conclua as autorizações do Windows, Tailscale e o registro Owner do DevSpace, quando solicitados.
+4. Vá à tela **Conectar chats** (Ctrl+C), selecione ChatGPT ou Claude, copie o endpoint MCP com **C** e abra a página de conectores com **O**.
+5. Cadastre a URL terminada em **/mcp**, autorize por OAuth e teste solicitando a leitura de um arquivo da pasta permitida.
 
-O cliente Rust não contorna permissões, não compartilha cookies nem transforma assinaturas web em chaves de API. Para Claude/Codex, os agentes externos controlam as ferramentas, e o DevSpace é registrado como MCP nas configurações deles.
+A instalação configura os pré-requisitos necessários via WinGet/npm, como Node.js, Git, Tailscale e DevSpace. Ela não precisa instalar Codex, Claude Code, SDKs de modelos nem APIs pagas.
 
-## Terminal: navegação
+**Para instalações existentes:** o aplicativo procura o endereço MCP já configurado no computador, sem recriar credenciais. Para diagnosticar, pressione **D**; para conferir a rede, **T**. Não execute outra instalação sobre um servidor já configurado antes de revisar o estado atual.
 
-| Tecla / comando | Função |
+## Conectar ao chat que você já usa
+
+### ChatGPT
+
+Em [Plugins do ChatGPT](https://chatgpt.com/plugins), use **+ > Adicionar servidor MCP personalizado**, quando disponível na sua conta e workspace. Informe o endpoint HTTPS do bridge, configure OAuth, revise as ações e escolha o plugin na conversa usando **@**.
+
+**Limite importante:** a disponibilidade de MCP personalizado e de ferramentas de escrita depende do plano e das permissões. Segundo a [documentação oficial da OpenAI](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt), MCP completo com ferramentas de escrita é disponibilizado para Business e Enterprise/Edu; Pro oferece conectores personalizados com permissões de leitura/fetch. A disponibilidade no plano pessoal não deve ser presumida.
+
+### Claude
+
+Em [Personalizar > Conectores](https://claude.ai/customize/connectors), adicione um **conector personalizado** com a URL HTTPS /mcp. Autorize por OAuth e habilite o conector na conversa normal. Claude conecta aos servidores remotos a partir de sua infraestrutura em nuvem, não diretamente de localhost.
+
+Veja o [guia oficial da Anthropic](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp) para as opções por plano e a autenticação.
+
+## Teclas
+
+| Tecla | Ação |
 |---|---|
-| Tab | Chat → Provedores → Setup → Logs → Ajuda |
-| Enter | Enviar chat / ativar provedor / executar ação |
-| Ctrl+P / Ctrl+S / Ctrl+L | Abrir Provedores / Setup / Logs |
-| Ctrl+N | Novo chat |
-| Ctrl+Q | Sair quando não há tarefas executando |
-| Ctrl+X | Solicitar cancelamento de CLI ou instalação em execução |
-| Esc | Voltar ao Chat ou cancelar edição |
-| F1 | Ajuda |
-| Provedores: P / M / E / K | Pasta / Modelo / Endpoint / Chave API |
-| Provedores: W | Solicitar permissão explícita para editar projetos |
-| /provider codex | Selecionar provedor sem sair do Chat |
-| /model gpt-4.1-mini | Selecionar modelo |
-| /cd C:\Projetos | Selecionar raiz de projetos |
-| /new, /help, /mcp, /status, /read, /write | Ações rápidas |
+| Tab / Esc | Trocar tela / voltar ao início |
+| Ctrl+C | Abrir a seção de conexão com chats |
+| Ctrl+S | Instalação/configuração |
+| Ctrl+L | Logs |
+| Ctrl+X | Cancelar uma operação em andamento |
+| Ctrl+Q | Sair |
+| Conectar: 1 / 2 | ChatGPT / Claude |
+| Conectar: C / O / P | Copiar URL / abrir chat / abrir painel Owner |
+| Configurar: R / I | Editar raiz de projetos / iniciar instalação |
+| Configurar: D / T | Diagnóstico / testar saúde HTTPS |
 
-**As instalações e os comandos são executados sem abrir outra janela CMD.** O resultado aparece na aba Logs. O Windows ainda pode mostrar confirmação UAC, e logins podem abrir o navegador — isso é necessário para proteger o computador e as contas.
+**Todas as telas do aplicativo são Ratatui**, e os comandos ficam em segundo plano com logs na própria TUI. O sistema ainda pode abrir o navegador para OAuth ou solicitar uma aprovação administrativa. Isso é independente do terminal do aplicativo.
 
-## DevSpace e MCP
+## Segurança
 
-Na aba Setup, existem ações para instalar dependências, executar diagnóstico, autenticar Codex/Claude e registrar o MCP.
+- **Funnel expõe uma URL pública:** só publique quando entender os riscos; a autenticação deve permanecer ativa.
+- Não remova a proteção Owner/OAuth do DevSpace e evite permitir acesso a todo o disco.
+- A TUI **não simula** políticas de permissões. Controle de leitura/escrita pertence ao servidor MCP, ao usuário do Windows e às permissões do cliente ChatGPT/Claude.
+- Uma resposta HTTP 200 de /healthz confirma rede, **não** uma sessão MCP autenticada nem a permissão de editar arquivos.
+- Qualquer ferramenta que modifica arquivos deve ser revisada antes de usá-la. Confirme pedidos de escrita no cliente.
+- O instalador preserva configurações existentes e nunca publica auth.json, tokens ou senhas no Git. Saídas de instalação são exibidas na TUI apenas na memória; não compartilhe logs que possam conter dados sensíveis.
+- A presença de um endpoint público não significa que ChatGPT ou Claude já tenham sido conectados: a configuração OAuth precisa ser concluída em cada plataforma.
+- A distribuição atual do Windows não é assinada digitalmente.
 
-Fluxo:
+## Limitações verificadas
 
-    Codex/Claude Code --- MCP OAuth --- HTTPS do Tailscale Funnel
-                                             |
-                                        DevSpace local
-                                             |
-                                          Projetos
+O bridge não modifica as capacidades oferecidas pela conta do ChatGPT/Claude. Não existe técnica legítima para transformar uma assinatura pessoal em acesso MCP de escrita quando a plataforma não permite isso.
 
-O servidor DevSpace **não é substituído**; usamos [@waishnav/devspace](https://github.com/Waishnav/devspace). A instalação configura Node.js, Git, Tailscale, Funnel, DevSpace e tarefa do Windows quando necessário. Scripts do projeto são embutidos no executável durante a compilação.
+Este programa não incorpora o código do OpenClaude, Codex ou Claude Code. **Nenhum motor de IA é instalado.** O objetivo é que o usuário continue usando os chats existentes e consiga conectar o PC através do servidor MCP.
 
-A conexão MCP usa a URL https://HOSTNAME.ts.net/mcp. Ela é diferente da origem pública do DevSpace, que não inclui /mcp. Os clientes precisam concluir OAuth. A saúde HTTP **não** comprova que ferramentas MCP foram autenticadas.
-
-## Privacidade e segurança
-
-- As chaves API ficam no **Windows Credential Manager**; não ficam no JSON de configuração nem são publicadas no Git.
-- Conversas são salvas em %APPDATA%\DevSpacePCBridge\config.json (texto local, **não criptografado**). Proteja sua conta Windows e faça a limpeza quando quiser.
-- O modo inicial dos agentes é **somente leitura**. Para habilitar edições, escolha W e confirme digitando AUTORIZAR. Não há bypass automático de sandbox.
-- A integração MCP dá ao agente acesso às permissões concedidas pelo DevSpace. Restrinja as raízes de projetos e revise operações sensíveis.
-- **Tailscale Funnel publica um HTTPS acessível pela internet.** A segurança depende de OAuth/Owner do DevSpace e da configuração da máquina.
-- O .exe distribuído pelo GitHub Actions ainda **não é assinado digitalmente**. Verifique sempre a origem da release.
-- O computador precisa estar ligado e online; se a conta Tailscale expirar, a sessão pode precisar de nova autenticação.
-
-## Limitações atuais
-
-Esta versão **não é um port integral** do OpenClaude: não inclui seu sistema de plugins, subagentes, memória, ferramentas nativas, extensões de IDE ou todos os comandos. O objetivo é manter um núcleo **funcional e leve** com provedores reais e experiência unificada. Também não oferece aprovação interativa de todas as chamadas de ferramenta dos CLIs de terceiros: suas próprias políticas continuam valendo.
-
-## Desenvolver
+## Desenvolvimento
 
     cargo test
     cargo build --release
 
-O binário fica em target\release\DevSpacePCBridge.exe. O GitHub Actions executa testes e publica releases para tags v*.
+O executável é gerado em target/release/DevSpacePCBridge.exe. Testes e releases são feitos por GitHub Actions em Windows.
 
-Para diagnosticar manualmente sem abrir a TUI:
-
+    DevSpacePCBridge.exe --version
     DevSpacePCBridge.exe --doctor
     .\tests\validate.ps1
-    .\scripts\doctor.ps1
 
-Arquitetura:
+Os scripts PowerShell em install.ps1 e scripts/ são incorporados ao executável Rust. As preferências da TUI ficam em %APPDATA%\DevSpacePCBridge\bridge-ui.json. Dados anteriores em config.json são preservados.
 
-    src/
-      main.rs       # TUI Ratatui, chat, menus, atalhos
-      backend.rs    # Codex/Claude CLI + API streaming
-      storage.rs    # Config, historico, Windows Credential Manager
-      setup.rs      # Dependencias, DevSpace/MCP, logs em background
-    scripts/        # Powershell supervisor/diagnostico/desinstalacao
-    install.ps1     # Provisionamento Windows
-    .github/workflows/
-
-**Licença:** MIT para o código deste projeto. DevSpace, Codex, Claude Code, Tailscale e OpenClaude mantêm suas licenças e políticas próprias.
+**Licença:** MIT para o código deste projeto. DevSpace e Tailscale são dependências de terceiros com suas próprias licenças.

@@ -1,17 +1,12 @@
-mod backend;
 mod setup;
 mod storage;
 
-use backend::{WorkerEvent, spawn_chat};
-use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 use setup::{Task, TaskEvent};
@@ -21,562 +16,202 @@ use std::{
     fs,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
-    time::{Duration, Instant},
+    time::Duration,
 };
-use storage::{Message, Provider, Settings};
-use zeroize::Zeroize;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
-
-const SETUP_ITEMS: &[(&str, Option<Task>)] = &[
-    ("Configurar DevSpace + Tailscale", Some(Task::InstallBridge)),
-    ("Executar diagnostico", Some(Task::Diagnose)),
-    ("Instalar Codex CLI", Some(Task::InstallCodex)),
-    ("Instalar Claude Code CLI", Some(Task::InstallClaude)),
-    ("Login Codex (ChatGPT)", Some(Task::LoginCodex)),
-    ("Login Claude", Some(Task::LoginClaude)),
-    ("Conectar MCP ao Codex", Some(Task::LinkCodexMcp)),
-    ("Autorizar OAuth MCP do Codex", Some(Task::AuthCodexMcp)),
-    ("Conectar MCP ao Claude", Some(Task::LinkClaudeMcp)),
-    ("Autorizar OAuth MCP do Claude", Some(Task::AuthClaudeMcp)),
-    ("Copiar URL MCP", None),
-    ("Abrir painel DevSpace", None),
-    ("Testar health HTTPS", None),
-];
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum Page {
-    Chat,
-    Providers,
-    Setup,
-    Logs,
-    Help,
-}
-
-impl Page {
-    fn next(self) -> Self {
-        match self {
-            Self::Chat => Self::Providers,
-            Self::Providers => Self::Setup,
-            Self::Setup => Self::Logs,
-            Self::Logs => Self::Help,
-            Self::Help => Self::Chat,
-        }
-    }
-}
+use storage::{ChatClient, Settings};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Edit {
-    None,
-    ApiKey,
-    Root,
-    Model,
-    Endpoint,
-    ConfirmWrite,
+enum Page { Home, Connect, Install, Security, Logs, Help }
+impl Page {
+    const ALL: [Self; 6] = [Self::Home, Self::Connect, Self::Install, Self::Security, Self::Logs, Self::Help];
+    fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|x| *x == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+    fn title(self) -> &'static str {
+        match self {
+            Self::Home => "Inicio",
+            Self::Connect => "Conectar chats",
+            Self::Install => "Configurar",
+            Self::Security => "Seguranca",
+            Self::Logs => "Logs",
+            Self::Help => "Ajuda",
+        }
+    }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edit { None, Workspace, Publish }
 
 struct App {
-    settings: Settings,
+    config: Settings,
     page: Page,
-    editor: Edit,
+    edit: Edit,
     input: String,
-    draft: String,
     feedback: String,
     logs: VecDeque<String>,
-    setup_index: usize,
-    provider_index: usize,
-    chat_scroll: u16,
-    follow_chat: bool,
-    log_scroll: u16,
-    busy_chat: bool,
-    busy_setup: bool,
-    chat_pid: Option<u32>,
-    setup_pid: Option<u32>,
-    cancel_chat: Arc<AtomicBool>,
-    chat_tx: Sender<WorkerEvent>,
-    chat_rx: Receiver<WorkerEvent>,
-    task_tx: Sender<TaskEvent>,
-    task_rx: Receiver<TaskEvent>,
-    last_status: Instant,
+    logs_offset: u16,
+    processing: bool,
+    process_pid: Option<u32>,
+    sender: Sender<TaskEvent>,
+    receiver: Receiver<TaskEvent>,
 }
-
 impl App {
     fn new() -> Self {
-        let settings = Settings::load();
-        let (chat_tx, chat_rx) = mpsc::channel();
-        let (task_tx, task_rx) = mpsc::channel();
-        let provider_index = Provider::ALL
-            .iter()
-            .position(|p| *p == settings.provider)
-            .unwrap_or(0);
+        let (sender, receiver) = mpsc::channel();
         Self {
-            settings,
-            page: Page::Chat,
-            editor: Edit::None,
+            config: Settings::load(),
+            page: Page::Home,
+            edit: Edit::None,
             input: String::new(),
-            draft: String::new(),
-            feedback: "Pronto. Enter envia mensagem | Tab alterna telas | F1 ajuda".into(),
+            feedback: "Use Tab para navegar. Configure e conecte seu chat habitual.".into(),
             logs: VecDeque::new(),
-            setup_index: 0,
-            provider_index,
-            chat_scroll: 0,
-            follow_chat: true,
-            log_scroll: 0,
-            busy_chat: false,
-            busy_setup: false,
-            chat_pid: None,
-            setup_pid: None,
-            cancel_chat: Arc::new(AtomicBool::new(false)),
-            chat_tx,
-            chat_rx,
-            task_tx,
-            task_rx,
-            last_status: Instant::now(),
+            logs_offset: u16::MAX,
+            processing: false,
+            process_pid: None,
+            sender,
+            receiver,
         }
     }
-
-    fn note(&mut self, message: impl Into<String>) {
-        let text = message.into();
-        self.feedback = text.clone();
-        self.logs.push_back(text);
-        while self.logs.len() > 300 {
-            self.logs.pop_front();
-        }
-        self.log_scroll = u16::MAX;
+    fn log(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.feedback = message.clone();
+        self.logs.push_back(message);
+        while self.logs.len() > 350 { self.logs.pop_front(); }
+        self.logs_offset = u16::MAX;
     }
-
     fn save(&mut self) {
-        if let Err(error) = self.settings.save() {
-            self.note(format!("Nao foi possivel salvar historico: {error}"));
-        }
+        if let Err(e) = self.config.save() { self.log(format!("Falha salvando preferencias: {e}")); }
     }
-
-    fn poll_workers(&mut self) {
-        while let Ok(event) = self.chat_rx.try_recv() {
-            match event {
-                WorkerEvent::ProcessStarted(pid) => self.chat_pid = Some(pid),
-                WorkerEvent::Chunk(delta) => {
-                    if let Some(message) = self.settings.messages.last_mut() {
-                        if message.role == "assistant" {
-                            message.content.push_str(&delta);
-                        }
-                    }
-                    self.follow_chat = true;
-                }
-                WorkerEvent::Info(text) => self.note(text),
-                WorkerEvent::Session(provider, id) => match provider {
-                    Provider::Codex => self.settings.codex_session_id = Some(id),
-                    Provider::ClaudeCode => self.settings.claude_session_id = Some(id),
-                    _ => {}
-                },
-                WorkerEvent::Finished(result) => {
-                    self.busy_chat = false;
-                    self.chat_pid = None;
-                    match result {
-                        Ok(()) => self.note("Resposta concluida."),
-                        Err(error) => {
-                            self.note(format!("Erro: {error}"));
-                            if let Some(last) = self.settings.messages.last_mut() {
-                                if last.role == "assistant" && last.content.is_empty() {
-                                    last.content = format!("[Erro: {error}]");
-                                }
-                            }
-                        }
-                    }
-                    self.save();
-                }
-            }
-        }
-        while let Ok(event) = self.task_rx.try_recv() {
-            match event {
-                TaskEvent::ProcessStarted(pid) => self.setup_pid = Some(pid),
-                TaskEvent::Line(line) => self.note(line),
-                TaskEvent::Finished(result) => {
-                    self.busy_setup = false;
-                    self.setup_pid = None;
-                    self.note(match result {
-                        Ok(()) => "Operacao concluida com sucesso.".to_owned(),
-                        Err(error) => format!("Falha: {error}. Confira o log."),
-                    });
-                }
-            }
-        }
-    }
-
-    fn send(&mut self) {
-        if self.busy_chat {
-            self.note("A resposta anterior ainda esta em execucao.");
-            return;
-        }
-        let prompt = self.input.trim().to_owned();
-        if prompt.is_empty() {
-            return;
-        }
-        if prompt.starts_with('/') {
-            self.input.clear();
-            self.slash_command(&prompt);
-            return;
-        }
-        if !self.settings.root.is_dir() {
-            self.note("Configure uma pasta de projetos existente em Provedores (tecla P).");
-            return;
-        }
-        self.input.clear();
-        self.settings.messages.push(Message { role: "user".into(), content: prompt });
-        self.settings.messages.push(Message { role: "assistant".into(), content: String::new() });
-        self.busy_chat = true;
-        self.follow_chat = true;
-        self.page = Page::Chat;
-        self.note(format!("Consultando {}...", self.settings.provider.label()));
-        self.save();
-        self.cancel_chat = Arc::new(AtomicBool::new(false));
-        spawn_chat(self.settings.clone(), self.chat_tx.clone(), self.cancel_chat.clone());
-    }
-
-    fn slash_command(&mut self, input: &str) {
-        let (command, argument) = input.split_once(' ').unwrap_or((input, ""));
-        let arg = argument.trim();
-        match command.to_ascii_lowercase().as_str() {
-            "/help" => self.page = Page::Help,
-            "/setup" => self.page = Page::Setup,
-            "/providers" => self.page = Page::Providers,
-            "/logs" => self.page = Page::Logs,
-            "/clear" | "/new" => {
-                self.settings.new_chat();
-                self.save();
-                self.note("Conversa reiniciada.");
-            }
-            "/model" => {
-                self.settings.model = arg.into();
-                self.settings.new_chat();
-                self.save();
-                self.note(format!("Modelo: {}", if arg.is_empty() { "padrao" } else { arg }));
-            }
-            "/provider" => {
-                if let Some(next) = Provider::ALL.iter().copied().find(|p| p.id() == arg) {
-                    self.settings.switch_provider(next);
-                    self.provider_index = Provider::ALL.iter().position(|p| *p == next).unwrap_or(0);
-                    self.save();
-                    self.note(format!("Provedor: {}", next.label()));
-                } else {
-                    self.note("Use: /provider codex|claude_code|openai|anthropic|openrouter|ollama");
-                }
-            }
-            "/cd" => {
-                let root = PathBuf::from(arg);
-                if root.is_dir() {
-                    self.settings.root = fs::canonicalize(&root).unwrap_or(root);
-                    self.settings.new_chat();
-                    self.save();
-                    self.note(format!("Pasta: {}", self.settings.root.display()));
-                } else {
-                    self.note("Use: /cd C:\\caminho\\existente");
-                }
-            }
-            "/mcp" => self.note(storage::devspace_mcp_url().unwrap_or_else(|| "Conecte o DevSpace na aba Setup.".into())),
-            "/write" => self.toggle_write(),
-            "/read" => {
-                if self.settings.allow_edits {
-                    self.toggle_write();
-                } else {
-                    self.note("Modo somente leitura ja esta ativo.");
-                }
-            }
-            "/status" => self.note(format!(
-                "{} | {} | {} mensagens | MCP: {}",
-                self.settings.provider.label(),
-                self.settings.root.display(),
-                self.settings.messages.len(),
-                if storage::devspace_mcp_url().is_some() { "configurado" } else { "pendente" },
-            )),
-            _ => self.note(format!("Comando desconhecido: {command}. Digite /help.")),
-        }
-    }
-
     fn start(&mut self, task: Task) {
-        if self.busy_setup {
-            self.note("Uma instalacao ou comando ja esta em execucao.");
+        if self.processing {
+            self.log("Ha uma operacao em andamento. Veja Logs ou Ctrl+X.");
             return;
         }
-        self.busy_setup = true;
+        self.processing = true;
+        self.process_pid = None;
         self.page = Page::Logs;
-        self.note(format!("Iniciando: {}. Acompanhe tudo nesta tela.", task.label()));
-        setup::start_task(task, self.settings.root.clone(), self.task_tx.clone());
+        self.log(format!("Iniciando {}...", task.label()));
+        setup::start(task, self.config.workspace.clone(), self.sender.clone());
     }
-
-    fn stop_running(&mut self) {
-        if let Some(pid) = self.setup_pid.or(self.chat_pid) {
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                let _ = std::process::Command::new("taskkill.exe")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .creation_flags(0x0800_0000)
-                    .output();
-            }
-            self.note("Cancelamento solicitado. Se for instalacao, confira o estado do sistema.");
-        } else if self.busy_chat {
-            self.cancel_chat.store(true, Ordering::Relaxed);
-            self.note("Cancelamento do streaming solicitado; pode depender do proximo pacote HTTP.");
-        } else if self.busy_setup {
-            self.note("Aguarde o processo de instalacao iniciar para cancelar.");
-        }
-    }
-
-    fn submit_edit(&mut self) {
-        let value = self.input.trim().to_owned();
-        match self.editor {
-            Edit::Root => {
-                let path = PathBuf::from(value);
-                if !path.is_dir() {
-                    self.note("Pasta invalida: informe o caminho de uma pasta existente.");
-                    return;
-                }
-                self.settings.root = fs::canonicalize(&path).unwrap_or(path);
-                self.settings.new_chat();
-                self.note("Pasta de projetos alterada. Novo contexto de conversa.");
-                self.save();
-            }
-            Edit::Model => {
-                self.settings.model = value;
-                self.settings.new_chat();
-                self.note("Modelo alterado e nova conversa iniciada.");
-                self.save();
-            }
-            Edit::Endpoint => {
-                if !value.is_empty() && !(value.starts_with("https://") || value.starts_with("http://127.0.0.1:") || value.starts_with("http://localhost:")) {
-                    self.note("Informe HTTPS ou HTTP local para Ollama.");
-                    return;
-                }
-                self.settings.endpoint = value;
-                self.settings.new_chat();
-                self.note("Endpoint atualizado.");
-                self.save();
-            }
-            Edit::ApiKey => {
-                match storage::store_key(self.settings.provider, &value) {
-                    Ok(()) => self.note("Chave salva no Gerenciador de Credenciais do Windows."),
-                    Err(error) => {
-                        self.note(error);
-                        return;
+    fn refresh(&mut self) {
+        while let Ok(event) = self.receiver.try_recv() {
+            match event {
+                TaskEvent::Started(pid) => self.process_pid = Some(pid),
+                TaskEvent::Line(text) => self.log(text),
+                TaskEvent::Done(result) => {
+                    self.processing = false;
+                    self.process_pid = None;
+                    match result {
+                        Ok(()) => self.log("Operacao concluida."),
+                        Err(err) => self.log(format!("Falha: {err}")),
                     }
                 }
             }
-            Edit::ConfirmWrite => {
-                if value == "AUTORIZAR" {
-                    self.settings.allow_edits = true;
-                    self.settings.new_chat();
-                    self.note("Modo edicao ativado para Codex/Claude. Nova conversa iniciada.");
-                    self.save();
-                } else {
-                    self.note("Permissao nao concedida. Modo leitura mantido.");
-                }
-            }
-            Edit::None => return,
         }
-        if self.editor == Edit::ApiKey {
-            self.input.zeroize();
-        } else {
-            self.input.clear();
-        }
-        self.editor = Edit::None;
-        self.input = std::mem::take(&mut self.draft);
     }
-
-    fn start_edit(&mut self, mode: Edit) {
-        if self.editor == Edit::None && self.page == Page::Providers && mode != Edit::ConfirmWrite {
-            let highlighted = Provider::ALL[self.provider_index];
-            if highlighted != self.settings.provider {
-                self.select_provider();
-                if self.settings.provider != highlighted {
-                    return;
-                }
-            }
-        }
-        if mode == Edit::ApiKey && !self.settings.provider.requires_key() {
-            self.note("Este provedor nao utiliza chave API. Use o login oficial ou Ollama.");
-            return;
-        }
-        if mode == Edit::Endpoint && self.settings.provider.is_agent() {
-            self.note("O agente CLI gerencia sua propria conexao. Nao precisa de endpoint API.");
-            return;
-        }
-        if self.editor == Edit::None {
-            self.draft = std::mem::take(&mut self.input);
-        }
-        self.editor = mode;
-        self.input = match mode {
-            Edit::Root => self.settings.root.to_string_lossy().into_owned(),
-            Edit::Model => self.settings.model().to_owned(),
-            Edit::Endpoint => self.settings.endpoint().to_owned(),
+    fn copy(&mut self) {
+        self.log(match setup::copy_url() {
+            Ok(url) => format!("URL MCP copiada: {url}"),
+            Err(err) => err,
+        });
+    }
+    fn open(&mut self) {
+        self.log(match setup::open_chat(self.config.client) {
+            Ok(()) => format!("Abrindo {} no navegador...", self.config.client.label()),
+            Err(err) => err,
+        });
+    }
+    fn select(&mut self, client: ChatClient) {
+        self.config.client = client;
+        self.save();
+        self.log(format!("Selecionado: {}", client.label()));
+    }
+    fn begin_edit(&mut self, kind: Edit) {
+        self.edit = kind;
+        self.input = match kind {
+            Edit::Workspace => self.config.workspace.to_string_lossy().into_owned(),
             _ => String::new(),
         };
     }
-
-    fn toggle_write(&mut self) {
-        if self.page == Page::Providers && Provider::ALL[self.provider_index] != self.settings.provider {
-            self.select_provider();
-            if Provider::ALL[self.provider_index] != self.settings.provider {
-                return;
-            }
-        }
-        if !self.settings.provider.is_agent() {
-            self.note("Modo de edicao pertence aos agentes CLI, nao ao chat API.");
-            return;
-        }
-        if self.settings.allow_edits {
-            self.settings.allow_edits = false;
-            self.settings.new_chat();
-            self.note("Modo somente leitura ativado.");
-            self.save();
-        } else {
-            self.start_edit(Edit::ConfirmWrite);
-            self.note("Digite AUTORIZAR para permitir edicoes na pasta de projetos.");
-        }
-    }
-
-    fn select_provider(&mut self) {
-        let next = Provider::ALL[self.provider_index];
-        if self.busy_chat {
-            self.note("Aguarde o agente terminar antes de trocar de provedor.");
-            return;
-        }
-        self.settings.switch_provider(next);
-        self.save();
-        self.note(format!("Provedor: {}", next.label()));
-    }
-
-    fn select_setup(&mut self) {
-        let selected = self.setup_index;
-        if let Some(task) = SETUP_ITEMS[selected].1 {
-            self.start(task);
-        } else {
-            match selected {
-                10 => self.note(match setup::copy_url() {
-                    Ok(url) => format!("MCP copiado: {url}"),
-                    Err(err) => err,
-                }),
-                11 => self.note(match setup::open_panel() {
-                    Ok(()) => "Painel aberto no navegador.".into(),
-                    Err(err) => err,
-                }),
-                12 => {
-                    self.note("Verificando health publico...");
-                    let tx = self.task_tx.clone();
-                    self.busy_setup = true;
-                    self.page = Page::Logs;
-                    std::thread::spawn(move || {
-                        let result = setup::test_mcp_endpoint()
-                            .map(|message| {
-                                let _ = tx.send(TaskEvent::Line(message));
-                            });
-                        let _ = tx.send(TaskEvent::Finished(result));
-                    });
+    fn submit_edit(&mut self) {
+        let value = self.input.trim().to_owned();
+        match self.edit {
+            Edit::Workspace => {
+                let path = PathBuf::from(value);
+                if !path.is_dir() {
+                    self.log("A pasta escolhida nao existe. Tente novamente.");
+                    return;
                 }
-                _ => {}
+                self.config.workspace = fs::canonicalize(&path).unwrap_or(path);
+                self.save();
+                self.log(format!("Pasta autorizada na proxima instalacao: {}", self.config.workspace.display()));
             }
+            Edit::Publish => {
+                if value != "PUBLICAR" {
+                    self.log("Instalacao cancelada. Digite PUBLICAR para confirmar a exposicao HTTPS.");
+                } else {
+                    self.edit = Edit::None;
+                    self.input.clear();
+                    self.start(Task::Install);
+                    return;
+                }
+            }
+            Edit::None => {}
         }
+        self.edit = Edit::None;
+        self.input.clear();
     }
-
-    fn shortcut(&mut self, key: KeyEvent) -> bool {
+    fn cancel_task(&mut self) {
+        if let Some(pid) = self.process_pid {
+            match setup::stop_pid(pid) {
+                Ok(()) => self.log("Cancelamento solicitado. Confira o estado da instalacao."),
+                Err(e) => self.log(format!("Falha ao cancelar: {e}")),
+            }
+        } else if self.processing { self.log("Aguarde o inicio do processo para cancelar."); }
+    }
+    fn key(&mut self, key: KeyEvent) -> bool {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('q') => {
-                    if self.busy_chat || self.busy_setup {
-                        self.note("Ha operacoes em andamento. Espere concluirem para sair.");
-                        return false;
-                    }
-                    return true;
+                    if self.processing { self.log("Finalize ou cancele o processo antes de sair."); }
+                    else { return true; }
                 }
-                KeyCode::Char('x') => self.stop_running(),
-                KeyCode::Char('n') => {
-                    if !self.busy_chat {
-                        self.settings.new_chat();
-                        self.save();
-                        self.note("Nova conversa criada.");
-                        self.follow_chat = true;
-                    }
-                }
-                KeyCode::Char('p') => self.page = Page::Providers,
-                KeyCode::Char('s') => self.page = Page::Setup,
+                KeyCode::Char('x') => self.cancel_task(),
                 KeyCode::Char('l') => self.page = Page::Logs,
-                KeyCode::Char('h') => self.page = Page::Help,
-                _ => return false,
+                KeyCode::Char('s') => self.page = Page::Install,
+                KeyCode::Char('c') => self.page = Page::Connect,
+                _ => {}
             }
             return false;
         }
-        if self.editor != Edit::None {
+        if self.edit != Edit::None {
             match key.code {
+                KeyCode::Esc => { self.edit = Edit::None; self.input.clear(); self.log("Acao cancelada."); }
+                KeyCode::Backspace => { self.input.pop(); }
                 KeyCode::Enter => self.submit_edit(),
-                KeyCode::Esc => {
-                    if self.editor == Edit::ApiKey {
-                        self.input.zeroize();
-                    }
-                    self.editor = Edit::None;
-                    self.input = std::mem::take(&mut self.draft);
-                    self.note("Edicao cancelada.");
-                }
-                KeyCode::Backspace => {
-                    self.input.pop();
-                }
-                KeyCode::Char(c) => {
-                    if self.input.chars().count() < 8_000 {
-                        self.input.push(c);
-                    }
-                }
+                KeyCode::Char(c) if self.input.chars().count() < 1024 => self.input.push(c),
                 _ => {}
             }
             return false;
         }
         match key.code {
-            KeyCode::F(1) => self.page = Page::Help,
             KeyCode::Tab => self.page = self.page.next(),
-            KeyCode::Esc => self.page = Page::Chat,
-            KeyCode::Enter => match self.page {
-                Page::Chat => self.send(),
-                Page::Providers => self.select_provider(),
-                Page::Setup => self.select_setup(),
-                _ => {}
-            },
-            KeyCode::Up => match self.page {
-                Page::Providers => self.provider_index = self.provider_index.saturating_sub(1),
-                Page::Setup => self.setup_index = self.setup_index.saturating_sub(1),
-                Page::Chat => {
-                    self.follow_chat = false;
-                    self.chat_scroll = self.chat_scroll.saturating_sub(1);
-                }
-                Page::Logs => self.log_scroll = self.log_scroll.saturating_sub(1),
-                _ => {}
-            },
-            KeyCode::Down => match self.page {
-                Page::Providers => self.provider_index = (self.provider_index + 1).min(Provider::ALL.len() - 1),
-                Page::Setup => self.setup_index = (self.setup_index + 1).min(SETUP_ITEMS.len() - 1),
-                Page::Chat => self.chat_scroll = self.chat_scroll.saturating_add(1),
-                Page::Logs => self.log_scroll = self.log_scroll.saturating_add(1),
-                _ => {}
-            },
-            KeyCode::PageUp => {
-                self.follow_chat = false;
-                self.chat_scroll = self.chat_scroll.saturating_sub(10);
+            KeyCode::Esc => self.page = Page::Home,
+            KeyCode::F(1) => self.page = Page::Help,
+            KeyCode::Char('1') if self.page == Page::Connect => self.select(ChatClient::ChatGpt),
+            KeyCode::Char('2') if self.page == Page::Connect => self.select(ChatClient::Claude),
+            KeyCode::Char('c') if matches!(self.page, Page::Home | Page::Connect | Page::Install) => self.copy(),
+            KeyCode::Char('o') if self.page == Page::Connect => self.open(),
+            KeyCode::Char('p') if self.page == Page::Connect => {
+                self.log(match setup::open_owner_panel() { Ok(()) => "Painel Owner aberto.".into(), Err(e) => e });
             }
-            KeyCode::PageDown => {
-                self.chat_scroll = self.chat_scroll.saturating_add(10);
-                self.log_scroll = self.log_scroll.saturating_add(10);
-            }
-            KeyCode::End => {
-                self.follow_chat = true;
-                self.log_scroll = u16::MAX;
-            }
-            KeyCode::Backspace if self.page == Page::Chat => { self.input.pop(); }
-            KeyCode::Char('p') if self.page == Page::Providers => self.start_edit(Edit::Root),
-            KeyCode::Char('m') if self.page == Page::Providers => self.start_edit(Edit::Model),
-            KeyCode::Char('e') if self.page == Page::Providers => self.start_edit(Edit::Endpoint),
-            KeyCode::Char('k') if self.page == Page::Providers => self.start_edit(Edit::ApiKey),
-            KeyCode::Char('w') if self.page == Page::Providers => self.toggle_write(),
-            KeyCode::Char(c) if self.page == Page::Chat => {
-                if self.input.chars().count() < 8_000 {
-                    self.input.push(c);
-                }
-            }
+            KeyCode::Char('r') if self.page == Page::Install => self.begin_edit(Edit::Workspace),
+            KeyCode::Char('i') if self.page == Page::Install => self.begin_edit(Edit::Publish),
+            KeyCode::Char('d') if matches!(self.page, Page::Install | Page::Home) => self.start(Task::Doctor),
+            KeyCode::Char('t') if matches!(self.page, Page::Install | Page::Home) => self.start(Task::CheckHealth),
+            KeyCode::Up if self.page == Page::Logs => self.logs_offset = self.logs_offset.saturating_sub(1),
+            KeyCode::Down if self.page == Page::Logs => self.logs_offset = self.logs_offset.saturating_add(1),
+            KeyCode::End if self.page == Page::Logs => self.logs_offset = u16::MAX,
             _ => {}
         }
         false
@@ -584,272 +219,193 @@ impl App {
 }
 
 fn draw(frame: &mut Frame, app: &App) {
-    let area = frame.area();
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(8), Constraint::Length(3)])
-        .split(area);
-    let title = Line::from(vec![
-        Span::styled("  DEVSPACE ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled("BRIDGE", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::styled(
-            "  Chat  |  Provedores  |  Setup  |  Logs  |  Ajuda",
-            Style::default().fg(Color::Gray),
-        ),
-    ]);
+    let full = frame.area();
+    let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(8), Constraint::Length(4)]).split(full);
     frame.render_widget(
-        Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)),
-        sections[0],
-    );
-    match app.page {
-        Page::Chat => draw_chat(frame, sections[1], app),
-        Page::Providers => draw_providers(frame, sections[1], app),
-        Page::Setup => draw_setup(frame, sections[1], app),
-        Page::Logs => draw_logs(frame, sections[1], app),
-        Page::Help => draw_help(frame, sections[1]),
-    }
-    let indicator = if app.busy_chat {
-        "AGENTE ATIVO"
-    } else if app.busy_setup {
-        "CONFIGURANDO"
-    } else {
-        "PRONTO"
-    };
-    frame.render_widget(
-        Paragraph::new(format!(" {} | {}\n Ctrl+Q sair  Tab telas  Ctrl+N novo chat  F1 ajuda", indicator, app.feedback))
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::TOP)),
-        sections[2],
-    );
-}
-
-fn draw_chat(frame: &mut Frame, bounds: Rect, app: &App) {
-    let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(4), Constraint::Length(5)]).split(bounds);
-    let mode = if app.settings.allow_edits && app.settings.provider.is_agent() { "EDICAO" } else { "LEITURA" };
-    frame.render_widget(
-        Paragraph::new(format!(
-            " {}  |  Modelo: {}  |  {}  |  {}",
-            app.settings.provider.label(),
-            if app.settings.model().is_empty() { "padrao da conta" } else { app.settings.model() },
-            mode,
-            app.settings.root.display(),
-        ))
-        .wrap(Wrap { trim: false })
-        .block(Block::bordered().title(" Sessao ").border_style(Color::DarkGray)),
+        Paragraph::new(Line::from(vec![
+            Span::styled("  DEVSPACE ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("PC BRIDGE", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("   |   ChatGPT + Claude  |  sem Codex/Claude Code CLI", Style::default().fg(Color::Gray)),
+        ])).block(Block::default().borders(Borders::BOTTOM)),
         rows[0],
     );
-    let mut lines: Vec<Line> = Vec::new();
-    if app.settings.messages.is_empty() {
-        lines.push(Line::styled("  Converse com Codex, Claude ou um provedor de API.", Style::default().fg(Color::DarkGray)));
-        lines.push(Line::styled("  Ctrl+P: escolher provedor | Ctrl+S: conectar DevSpace", Style::default().fg(Color::DarkGray)));
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("  Codex/Claude usam as ferramentas dos agentes instalados."));
-        lines.push(Line::raw("  APIs e Ollama permitem chat, sem ferramentas locais automaticas."));
-    }
-    for message in &app.settings.messages {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            if message.role == "user" { "  VOCE" } else { "  ASSISTENTE" },
-            Style::default()
-                .fg(if message.role == "user" { Color::Green } else { Color::Cyan })
-                .add_modifier(Modifier::BOLD),
-        ));
-        for line in message.content.lines() {
-            lines.push(Line::raw(format!("  {line}")));
-        }
-    }
-    if app.busy_chat {
-        lines.push(Line::styled("  ... recebendo resposta ...", Style::default().fg(Color::Yellow)));
-    }
-    let display_height = rows[1].height.saturating_sub(2);
-    let approx_count = lines
-        .iter()
-        .map(|line| {
-            let width = usize::from(rows[1].width.saturating_sub(5).max(1));
-            ((line.width() + width.saturating_sub(1)) / width).max(1)
-        })
-        .sum::<usize>();
-    let last = approx_count.saturating_sub(display_height as usize);
-    let offset = if app.follow_chat { last.min(u16::MAX as usize) as u16 } else { app.chat_scroll };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .scroll((offset, 0))
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered().title(" Conversa ").border_style(Color::DarkGray)),
-        rows[1],
-    );
-    let editor_label = match app.editor {
-        Edit::ApiKey => " Chave API (oculta; Enter salva no Windows) ",
-        Edit::Root => " Caminho do projeto (Enter salva; Esc volta) ",
-        Edit::Model => " Modelo (Enter salva; Esc volta) ",
-        Edit::Endpoint => " Endpoint API (Enter salva; Esc volta) ",
-        Edit::ConfirmWrite => " Digite AUTORIZAR para permitir edicao ",
-        Edit::None => " Sua mensagem (Enter enviar) ",
-    };
-    let input = if app.editor == Edit::ApiKey {
-        "•".repeat(app.input.chars().count())
-    } else {
-        app.input.clone()
-    };
-    frame.render_widget(
-        Paragraph::new(format!("{}\n{}", input, if app.busy_chat { "Aguardando resposta..." } else { "Digite a mensagem e pressione Enter." }))
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered().title(editor_label).border_style(Color::Cyan)),
-        rows[2],
-    );
-}
 
-fn draw_providers(frame: &mut Frame, bounds: Rect, app: &App) {
-    let split = Layout::horizontal([Constraint::Length(39), Constraint::Min(20)]).split(bounds);
-    let rows = Provider::ALL.iter().enumerate().map(|(index, provider)| {
-        let active = if *provider == app.settings.provider { " *" } else { "" };
-        let style = if index == app.provider_index {
-            Style::default().bg(Color::Cyan).fg(Color::Black)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        ListItem::new(format!(" {}{}", provider.label(), active)).style(style)
+    let cols = Layout::horizontal([Constraint::Length(24), Constraint::Min(28)]).split(rows[1]);
+    let menu = Page::ALL.iter().map(|page| {
+        let active = app.page == *page;
+        ListItem::new(format!("  {}", page.title())).style(if active {
+            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else { Style::default().fg(Color::Gray) })
     });
-    frame.render_widget(List::new(rows).block(Block::bordered().title(" Provedores ").border_style(Color::DarkGray)), split[0]);
-    let current = Provider::ALL[app.provider_index];
-    let body = format!(
-        "Selecionado: {}\n\nModelo: {}\nEndpoint: {}\n\nPasta: {}\nPermissao: {}\n\nEnter: ativar provedor\nP: editar pasta\nM: editar modelo\nE: editar endpoint\nK: salvar chave API\nW: alternar permissao de edicao\n\nCodex: usa sua autenticacao ChatGPT no CLI.\nClaude Code: usa autenticacao do Claude CLI.\nAPI: exige chave propria, armazenada no Windows.\nOllama: roda modelos localmente.",
-        current.label(),
-        if app.settings.model().is_empty() { current.default_model() } else { app.settings.model() },
-        if app.settings.endpoint().is_empty() { current.default_endpoint() } else { app.settings.endpoint() },
-        app.settings.root.display(),
-        if app.settings.allow_edits { "edicao autorizada" } else { "somente leitura" },
+    frame.render_widget(
+        List::new(menu).block(Block::bordered().title(" Navegacao (Tab) ").border_style(Color::DarkGray)),
+        cols[0],
     );
+    let (title, body) = page_content(app);
+    let offset = if app.page == Page::Logs {
+        let count = app.logs.len();
+        let height = cols[1].height.saturating_sub(2) as usize;
+        if app.logs_offset == u16::MAX { count.saturating_sub(height).min(u16::MAX as usize) as u16 }
+        else { app.logs_offset }
+    } else { 0 };
     frame.render_widget(
         Paragraph::new(body)
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered().title(" Configuracao ").border_style(Color::DarkGray)),
-        split[1],
-    );
-    if app.editor != Edit::None {
-        let box_rect = centered(bounds, 78, 8);
-        frame.render_widget(ratatui::widgets::Clear, box_rect);
-        let secret = app.editor == Edit::ApiKey;
-        let content = if secret { "•".repeat(app.input.chars().count()) } else { app.input.clone() };
-        frame.render_widget(
-            Paragraph::new(format!("{}\n\nEnter: salvar  |  Esc: cancelar", content))
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title(if secret { " Credencial Windows " } else { " Editar configuracao " }).border_style(Color::Yellow)),
-            box_rect,
-        );
-    }
-}
-
-fn draw_setup(frame: &mut Frame, bounds: Rect, app: &App) {
-    let layout = Layout::horizontal([Constraint::Length(40), Constraint::Min(20)]).split(bounds);
-    let items = SETUP_ITEMS.iter().enumerate().map(|(index, (label, _))| {
-        let style = if index == app.setup_index {
-            Style::default().bg(Color::Cyan).fg(Color::Black)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        ListItem::new(format!(" {label}")).style(style)
-    });
-    frame.render_widget(List::new(items).block(Block::bordered().title(" Setup (Enter executar) ").border_style(Color::DarkGray)), layout[0]);
-    let mcp = storage::devspace_mcp_url().unwrap_or_else(|| "(ainda nao configurado)".into());
-    let body = format!(
-        "STATUS\n{}\n\nMCP\n{}\n\nPASTA\n{}\n\n{}\n\nTodas as etapas sao executadas em segundo plano, com logs visiveis na aba Logs.\nNenhum CMD extra e aberto pelo aplicativo.\n\nTailscale e OAuth podem exigir aprovacao no navegador. A instalacao de pacotes pode solicitar UAC.\n\nApenas o setup altera configuracoes do sistema.",
-        if app.busy_setup { "Operacao em andamento" } else { "Pronto para configurar" },
-        mcp,
-        app.settings.root.display(),
-        app.feedback,
-    );
-    frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }).block(Block::bordered().title(" Conexao DevSpace ").border_style(Color::DarkGray)), layout[1]);
-}
-
-fn draw_logs(frame: &mut Frame, bounds: Rect, app: &App) {
-    let body = app.logs.iter().map(|line| Line::raw(line.as_str())).collect::<Vec<_>>();
-    let height = bounds.height.saturating_sub(2);
-    let max_offset = body.len().saturating_sub(height as usize);
-    let offset = if app.log_scroll == u16::MAX { max_offset.min(u16::MAX as usize) as u16 } else { app.log_scroll };
-    frame.render_widget(
-        Paragraph::new(Text::from(body))
-            .wrap(Wrap { trim: false })
             .scroll((offset, 0))
-            .block(Block::bordered().title(" Log ao vivo (setas para navegar) ").border_style(Color::DarkGray)),
-        bounds,
-    );
-}
-
-fn draw_help(frame: &mut Frame, bounds: Rect) {
-    let help = [
-        "DEVSPACE PC BRIDGE — GUIA RAPIDO",
-        "",
-        "1. Provedores: escolha Codex, Claude, OpenAI, Anthropic, OpenRouter ou Ollama.",
-        "2. Codex/Claude Code: instale e autentique seus respectivos CLIs na aba Setup.",
-        "3. Para acesso aos seus arquivos via MCP: Setup > Instalar DevSpace + Tailscale.",
-        "4. Depois conecte DevSpace via MCP aos agentes; conclua OAuth no navegador.",
-        "5. Volte ao Chat: digite e envie com Enter.",
-        "",
-        "ATALHOS",
-        "Tab              Alternar telas, sem abrir outras janelas de terminal.",
-        "Ctrl+P / S / L   Provedores / Setup / Logs",
-        "Ctrl+N           Nova conversa (nao apaga chats antigos do Codex/Claude).",
-        "Comandos /help, /new, /model, /provider, /cd, /mcp, /status, /read, /write",
-        "Ctrl+Q           Sair (requer tarefas concluidas).",
-        "Ctrl+X           Cancelar comando CLI/instalador em execucao.",
-        "F1              Ajuda",
-        "Esc             Voltar ao Chat / cancelar edicao",
-        "Setas            Escolher provedor/acao ou navegar na conversa",
-        "End             Ir ao final da conversa",
-        "",
-        "SEGURANCA",
-        "Modo somente leitura por padrao. Edicao exige autorizacao explicita.",
-        "Credenciais API ficam no Windows Credential Manager; nao no JSON da conversa.",
-        "Historico de conversas fica no APPDATA da sua conta Windows.",
-        "O Funnel publica HTTPS na internet: mantenha Owner/OAuth e roots restritos.",
-        "O ChatGPT e o Claude nao fornecem API por meio da assinatura web.",
-    ].join("\n");
-    frame.render_widget(
-        Paragraph::new(help)
             .wrap(Wrap { trim: false })
-            .block(Block::bordered().title(" Ajuda ").border_style(Color::DarkGray)),
-        bounds,
+            .block(Block::bordered().title(title).border_style(Color::DarkGray)),
+        cols[1],
     );
+    let status = if app.processing { "EM EXECUCAO" } else { "PRONTO" };
+    frame.render_widget(
+        Paragraph::new(format!(
+            " {status}  |  {}\n Tab telas  |  Ctrl+C Conectar  |  Ctrl+S Configurar  |  Ctrl+L Logs  |  Ctrl+X Cancelar  |  Ctrl+Q Sair",
+            app.feedback
+        )).wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::TOP)),
+        rows[2],
+    );
+    if app.edit != Edit::None { draw_prompt(frame, app, full); }
 }
 
-fn centered(bounds: Rect, percent: u16, height: u16) -> Rect {
-    let width = bounds.width.saturating_mul(percent).saturating_div(100).max(15);
-    let x = bounds.x + bounds.width.saturating_sub(width) / 2;
-    let y = bounds.y + bounds.height.saturating_sub(height) / 2;
-    Rect::new(x, y, width.min(bounds.width), height.min(bounds.height))
+fn page_content(app: &App) -> (&'static str, Text<'static>) {
+    let lines = match app.page {
+        Page::Home => vec![
+            " SEU COMPUTADOR, NOS SEUS CHATS NORMAIS".into(),
+            "".into(),
+            setup::status_summary(),
+            "".into(),
+            "Use Configurar para instalar o bridge (se necessario).".into(),
+            "Use Conectar chats para copiar a URL e configurar OAuth.".into(),
+            "".into(),
+            format!("Pasta de projetos: {}", app.config.workspace.display()),
+            "".into(),
+            " [C] Copiar MCP   [D] Diagnostico   [T] Testar HTTPS".into(),
+            "".into(),
+            "Nao e um chatbot nem executa modelos de IA.".into(),
+        ],
+        Page::Connect => {
+            let mut v = vec![
+                " SELECIONE O CHAT QUE VOCE JA USA".into(),
+                "".into(),
+                format!(" [1] ChatGPT {}",
+                    if app.config.client == ChatClient::ChatGpt { "< selecionado" } else { "" }),
+                format!(" [2] Claude {}",
+                    if app.config.client == ChatClient::Claude { "< selecionado" } else { "" }),
+                "".into(),
+                format!("URL MCP: {}", storage::mcp_url().unwrap_or_else(|| "(configure o bridge primeiro)".into())),
+                "".into(),
+                " [C] Copiar URL /mcp   [O] Abrir chat/conectores".into(),
+                " [P] Abrir painel Owner DevSpace".into(),
+                "".into(),
+            ];
+            v.extend(app.config.client.instructions().iter().map(|s| (*s).to_owned()));
+            v
+        }
+        Page::Install => vec![
+            " INSTALACAO AUTOMATICA, SEM OUTRO CMD".into(),
+            "".into(),
+            format!("Pasta permitida: {}", app.config.workspace.display()),
+            "".into(),
+            " [R] Alterar a pasta de projetos".into(),
+            " [I] Instalar/Configurar DevSpace + Tailscale".into(),
+            " [D] Executar diagnostico somente leitura".into(),
+            " [T] Testar health local e HTTPS".into(),
+            "".into(),
+            "O instalador prepara Node.js, Git, Tailscale e DevSpace.".into(),
+            "A primeira configuracao pode solicitar UAC, Tailscale e OAuth.".into(),
+            "Nao substitui credenciais ou configuracoes existentes.".into(),
+            "".into(),
+            "IMPORTANTE: o Tailscale Funnel publica a URL na internet.".into(),
+            "Iniciar instalacao exige confirmar PUBLICAR.".into(),
+        ],
+        Page::Security => vec![
+            " PERMISSOES SAO APLICADAS NO SERVIDOR E NO CHAT".into(),
+            "".into(),
+            "1. DevSpace: restrinja workspaces/allowedRoots.".into(),
+            "2. DevSpace Owner: autorize clientes OAuth confiaveis.".into(),
+            "3. ChatGPT/Claude: revise ferramentas e confirme escritas.".into(),
+            "4. Nao publique auth.json, tokens ou credenciais.".into(),
+            "".into(),
+            "O bridge nao concede escrita por botao falso na TUI.".into(),
+            "O servidor MCP decide o que uma ferramenta pode fazer.".into(),
+            "Permissao do plano/chat pode restringir ferramentas.".into(),
+            "".into(),
+            "A publicacao HTTPS implica risco: use com criterio.".into(),
+            "Para revogar: desconecte o app no chat e no DevSpace.".into(),
+        ],
+        Page::Logs => {
+            let mut v = vec![" SAIDA AO VIVO (sem abrir outros terminais)".into(), "".into()];
+            if app.logs.is_empty() { v.push("Nenhuma operacao iniciada.".into()); }
+            v.extend(app.logs.iter().cloned());
+            v
+        },
+        Page::Help => vec![
+            " 1. Escolha a pasta em Configurar [R].".into(),
+            " 2. Instale o bridge com [I], confirme PUBLICAR.".into(),
+            " 3. Acesse Conectar chats, escolha [1] ou [2].".into(),
+            " 4. Copie o endpoint MCP com [C].".into(),
+            " 5. Abra o chat normal com [O], adicione o MCP.".into(),
+            " 6. Autorize OAuth Owner e teste leitura no chat.".into(),
+            "".into(),
+            " Tab: proxima tela    Esc: Inicio    F1: Ajuda".into(),
+            " Ctrl+C: Conectar     Ctrl+S: Configurar".into(),
+            " Ctrl+L: Logs         Ctrl+X: Cancelar processo".into(),
+            " Ctrl+Q: Sair         C: Copiar endpoint".into(),
+            "".into(),
+            "Nao requer Codex CLI, Claude Code, chaves API ou".into(),
+            "copia dos modelos no computador.".into(),
+            "Precisa de uma conta compatível no ChatGPT/Claude.".into(),
+        ],
+    };
+    (app.page.title(), Text::from(lines.join("\n")))
+}
+
+fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
+    let width = area.width.saturating_sub(8).min(78);
+    let height = 8.min(area.height.saturating_sub(2));
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let (title, text) = match app.edit {
+        Edit::Workspace => ("Pasta de projetos", format!(
+            "Digite o caminho de uma pasta existente:\n{}\n\nEnter confirmar | Esc cancelar", app.input)),
+        Edit::Publish => ("CONFIRMACAO DE EXPOSICAO PUBLICA", format!(
+            "Tailscale Funnel expora uma URL HTTPS.\nOAuth do DevSpace deve proteger o acesso.\nDigite PUBLICAR para continuar:\n{}\n\nEnter confirmar | Esc cancelar", app.input)),
+        Edit::None => return,
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(Block::bordered().title(title).border_style(Color::Yellow)),
+        popup,
+    );
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut app = App::new();
     let mut terminal = ratatui::init();
-    crossterm::execute!(std::io::stdout(), EnableBracketedPaste)?;
     let result = (|| -> Result<(), Box<dyn Error>> {
         loop {
-            app.poll_workers();
-            if app.last_status.elapsed() > Duration::from_secs(5) {
-                app.last_status = Instant::now();
-            }
+            app.refresh();
             terminal.draw(|frame| draw(frame, &app))?;
-            if !event::poll(Duration::from_millis(100))? {
-                continue;
-            }
+            if !event::poll(Duration::from_millis(150))? { continue; }
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if app.shortcut(key) {
-                        break;
-                    }
+                    if app.key(key) { break; }
                 }
-                Event::Paste(value) if app.page == Page::Chat || app.editor != Edit::None => {
-                    let max = 8_000usize.saturating_sub(app.input.chars().count());
-                    app.input.extend(value.chars().filter(|c| *c != '\r' && *c != '\0').take(max));
+                Event::Paste(value) if app.edit != Edit::None => {
+                    let remaining = 1024usize.saturating_sub(app.input.len());
+                    app.input.extend(value.chars().filter(|c| *c != '\r' && *c != '\0').take(remaining));
                 }
                 _ => {}
             }
         }
         Ok(())
     })();
-    let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
 }
@@ -857,16 +413,15 @@ fn run() -> Result<(), Box<dyn Error>> {
 fn main() -> Result<(), Box<dyn Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("--version" | "-V") => {
-            println!("DevSpace PC Bridge v{}", env!("CARGO_PKG_VERSION"));
-            Ok(())
+            println!("DevSpace PC Bridge v{}", env!("CARGO_PKG_VERSION")); Ok(())
         }
         Some("--doctor") => {
-            println!("URL MCP: {}", storage::devspace_mcp_url().unwrap_or_else(|| "nao configurado".into()));
-            println!("Codex CLI: {}", backend::is_available("codex"));
-            println!("Claude Code CLI: {}", backend::is_available("claude"));
+            println!("{}", setup::status_summary());
+            println!("Raiz: {}", Settings::load().workspace.display());
+            println!("Diagnostico de rede: use a TUI > Configurar > T.");
             Ok(())
         }
-        Some(other) => Err(format!("Argumento desconhecido: {other}").into()),
+        Some(arg) => Err(format!("Argumento nao reconhecido: {arg}").into()),
         None => run(),
     }
 }

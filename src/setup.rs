@@ -1,11 +1,12 @@
-use crate::storage;
+use crate::storage::{self, ChatClient};
 use std::{
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Command, Stdio},
     sync::mpsc::Sender,
     thread,
+    time::Duration,
 };
 
 const INSTALL: &str = include_str!("../install.ps1");
@@ -13,250 +14,188 @@ const SUPERVISOR: &str = include_str!("../scripts/bridge.ps1");
 const DOCTOR: &str = include_str!("../scripts/doctor.ps1");
 const UNINSTALL: &str = include_str!("../scripts/uninstall.ps1");
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Task {
-    InstallBridge,
-    Diagnose,
-    InstallCodex,
-    InstallClaude,
-    LoginCodex,
-    LoginClaude,
-    LinkCodexMcp,
-    LinkClaudeMcp,
-    AuthCodexMcp,
-    AuthClaudeMcp,
+    Install,
+    Doctor,
+    CheckHealth,
 }
-
 impl Task {
     pub fn label(self) -> &'static str {
         match self {
-            Self::InstallBridge => "Preparando DevSpace e Tailscale",
-            Self::Diagnose => "Verificando instalacao",
-            Self::InstallCodex => "Instalando Codex CLI",
-            Self::InstallClaude => "Instalando Claude Code CLI",
-            Self::LoginCodex => "Autorizando conta ChatGPT / Codex",
-            Self::LoginClaude => "Autorizando Claude Code",
-            Self::LinkCodexMcp => "Registrando DevSpace no Codex",
-            Self::LinkClaudeMcp => "Registrando DevSpace no Claude Code",
-            Self::AuthCodexMcp => "Autorizando DevSpace MCP no Codex",
-            Self::AuthClaudeMcp => "Autorizando DevSpace MCP no Claude Code",
+            Self::Install => "Instalacao do bridge",
+            Self::Doctor => "Diagnostico local",
+            Self::CheckHealth => "Teste da conexao local e HTTPS",
         }
     }
 }
 
 pub enum TaskEvent {
-    ProcessStarted(u32),
+    Started(u32),
     Line(String),
-    Finished(Result<(), String>),
+    Done(Result<(), String>),
 }
 
-fn bundled_scripts() -> Result<PathBuf, String> {
-    let base = std::env::temp_dir().join(format!("devspace-pc-bridge-{}", std::process::id()));
-    fs::create_dir_all(base.join("scripts")).map_err(|error| error.to_string())?;
-    for (name, value) in [
-        ("install.ps1", INSTALL),
-        ("scripts/bridge.ps1", SUPERVISOR),
-        ("scripts/doctor.ps1", DOCTOR),
-        ("scripts/uninstall.ps1", UNINSTALL),
-    ] {
-        fs::write(base.join(name), value).map_err(|error| error.to_string())?;
-    }
-    Ok(base)
+#[cfg(windows)]
+fn hidden_process(name: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = Command::new(name);
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: logs are shown inside Ratatui.
+    cmd
 }
+#[cfg(not(windows))]
+fn hidden_process(name: &str) -> Command { Command::new(name) }
 
-fn hidden_command(name: &str) -> Command {
-    #[cfg(windows)]
-    let executable = match name {
-        "codex" => "codex.cmd",
-        "claude" => "claude.cmd",
-        other => other,
-    };
-    #[cfg(not(windows))]
-    let executable = name;
-    let mut command = Command::new(executable);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    command
+pub fn open_chat(client: ChatClient) -> Result<(), String> {
+    hidden_process("explorer.exe")
+        .arg(client.link())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Nao foi possivel abrir navegador: {e}"))
 }
-
-fn run_process(mut command: Command, tx: &Sender<TaskEvent>) -> Result<(), String> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
-    let mut child = command.spawn().map_err(|error| format!("Falha ao iniciar: {error}"))?;
-    let _ = tx.send(TaskEvent::ProcessStarted(child.id()));
-    let stdout = child.stdout.take().ok_or("stdout indisponivel")?;
-    let stderr = child.stderr.take().ok_or("stderr indisponivel")?;
-
-    let out_sender = tx.clone();
-    let output = thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = out_sender.send(TaskEvent::Line(line));
-        }
-    });
-    let error_sender = tx.clone();
-    let error_output = thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let _ = error_sender.send(TaskEvent::Line(format!("! {line}")));
-        }
-    });
-    let code = child.wait().map_err(|error| format!("Falha aguardando comando: {error}"))?;
-    let _ = output.join();
-    let _ = error_output.join();
-    if code.success() {
-        Ok(())
-    } else {
-        Err(format!("Comando terminou com codigo {code}"))
-    }
+pub fn open_owner_panel() -> Result<(), String> {
+    let url = storage::mcp_url().ok_or("Bridge nao configurado")?;
+    hidden_process("explorer.exe")
+        .arg(format!("{}/web/", url.trim_end_matches("/mcp")))
+        .spawn().map(|_| ())
+        .map_err(|e| format!("Nao foi possivel abrir painel: {e}"))
 }
-
-pub fn start_task(task: Task, root: PathBuf, tx: Sender<TaskEvent>) {
-    thread::spawn(move || {
-        let _ = tx.send(TaskEvent::Line(format!("> {}", task.label())));
-        let result = execute(task, root, &tx);
-        let _ = tx.send(TaskEvent::Finished(result));
-    });
-}
-
-fn execute(task: Task, root: PathBuf, tx: &Sender<TaskEvent>) -> Result<(), String> {
-    if matches!(task, Task::LinkCodexMcp | Task::LinkClaudeMcp) {
-        let expected = storage::devspace_mcp_url().ok_or("MCP DevSpace nao configurado")?;
-        let client = if matches!(task, Task::LinkCodexMcp) { "codex" } else { "claude" };
-        let mut check = hidden_command(client);
-        check.args(["mcp", "get", "devspace"]);
-        if let Ok(existing) = check.output() {
-            if existing.status.success() {
-                if String::from_utf8_lossy(&existing.stdout).contains(&expected) {
-                    let _ = tx.send(TaskEvent::Line("MCP DevSpace ja esta registrado corretamente.".into()));
-                    return Ok(());
-                }
-                return Err("Ja existe um MCP chamado devspace apontando para outra URL. Nao substituido.".into());
-            }
-        }
-    }
-    let command = match task {
-        Task::InstallBridge | Task::Diagnose => {
-            let path = bundled_scripts()?;
-            let script = if matches!(task, Task::InstallBridge) {
-                if !root.is_dir() {
-                    return Err("Pasta de projetos inexistente".into());
-                }
-                path.join("install.ps1")
-            } else {
-                path.join("scripts").join("doctor.ps1")
-            };
-            let mut command = hidden_command("powershell.exe");
-            command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
-            command.arg(script);
-            if matches!(task, Task::InstallBridge) {
-                command.arg("-WorkspacesRoot").arg(root);
-            }
-            command
-        }
-        Task::InstallCodex | Task::InstallClaude => {
-            let mut command = hidden_command("npm.cmd");
-            command.args(["install", "--global"]);
-            command.arg(if matches!(task, Task::InstallCodex) {
-                "@openai/codex"
-            } else {
-                "@anthropic-ai/claude-code"
-            });
-            command
-        }
-        Task::LoginCodex => {
-            let mut command = hidden_command("codex");
-            command.arg("login");
-            command
-        }
-        Task::LoginClaude => {
-            let mut command = hidden_command("claude");
-            command.args(["auth", "login"]);
-            command
-        }
-        Task::LinkCodexMcp | Task::LinkClaudeMcp | Task::AuthCodexMcp | Task::AuthClaudeMcp => {
-            let url = storage::devspace_mcp_url()
-                .ok_or("DevSpace ainda nao foi configurado. Configure primeiro.")?;
-            if matches!(task, Task::LinkCodexMcp) {
-                let mut command = hidden_command("codex");
-                command.args(["mcp", "add", "devspace", "--url", &url]);
-                command
-            } else if matches!(task, Task::AuthCodexMcp) {
-                let mut command = hidden_command("codex");
-                command.args(["mcp", "login", "devspace", "--oauth-client-registration", "DCR"]);
-                command
-            } else if matches!(task, Task::AuthClaudeMcp) {
-                let mut command = hidden_command("claude");
-                command.args(["mcp", "login", "devspace"]);
-                command
-            } else {
-                let mut command = hidden_command("claude");
-                command.args(["mcp", "add", "--transport", "http", "--scope", "user", "devspace", &url]);
-                command
-            }
-        }
-    };
-    run_process(command, tx)
-}
-
 pub fn copy_url() -> Result<String, String> {
-    let url = storage::devspace_mcp_url().ok_or("Nenhuma URL MCP configurada")?;
-    let mut child = hidden_command("clip.exe")
+    let url = storage::mcp_url().ok_or("URL MCP nao encontrada. Configure o DevSpace primeiro.")?;
+    let mut child = hidden_process("clip.exe")
         .stdin(Stdio::piped())
         .spawn()
-        .map_err(|error| error.to_string())?;
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .ok_or("Clipboard indisponivel")?
+        .map_err(|e| format!("Clipboard: {e}"))?;
+    child.stdin.take().ok_or("Clipboard nao disponivel")?
         .write_all(url.as_bytes())
-        .map_err(|error| error.to_string())?;
-    let status = child.wait().map_err(|error| error.to_string())?;
-    if !status.success() {
+        .map_err(|e| e.to_string())?;
+    if !child.wait().map_err(|e| e.to_string())?.success() {
         return Err("Falha ao copiar para o clipboard".into());
     }
     Ok(url)
 }
 
-pub fn open_panel() -> Result<(), String> {
-    let url = storage::devspace_mcp_url().ok_or("Nenhum MCP configurado")?;
-    let panel = url.trim_end_matches("/mcp").to_owned() + "/web/";
-    // Default browser can open a GUI window, but no extra terminal/CMD window.
-    hidden_command("explorer.exe")
-        .arg(panel)
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    Ok(())
+fn script_bundle() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join(format!("devspace-bridge-setup-{}", std::process::id()));
+    fs::create_dir_all(dir.join("scripts")).map_err(|e| e.to_string())?;
+    for (name, contents) in [
+        ("install.ps1", INSTALL),
+        ("scripts/bridge.ps1", SUPERVISOR),
+        ("scripts/doctor.ps1", DOCTOR),
+        ("scripts/uninstall.ps1", UNINSTALL),
+    ] {
+        fs::write(dir.join(name), contents).map_err(|e| e.to_string())?;
+    }
+    Ok(dir)
 }
 
-pub fn test_mcp_endpoint() -> Result<String, String> {
-    let url = storage::devspace_mcp_url().ok_or("URL MCP ausente")?;
-    let origin = url.trim_end_matches("/mcp");
-    let response = reqwest::blocking::Client::new()
-        .get(format!("{origin}/healthz"))
-        .timeout(std::time::Duration::from_secs(8))
-        .send()
-        .map_err(|error| format!("Health publico indisponivel: {error}"))?;
-    Ok(format!(
-        "Health HTTPS: HTTP {} (autenticacao MCP deve ser validada no cliente)",
-        response.status()
-    ))
+fn spawn_command(mut cmd: Command, tx: &Sender<TaskEvent>) -> Result<(), String> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar: {e}"))?;
+    let _ = tx.send(TaskEvent::Started(child.id()));
+    let out = child.stdout.take().ok_or("Sem stdout")?;
+    let err = child.stderr.take().ok_or("Sem stderr")?;
+    let output_tx = tx.clone();
+    let thread_out = thread::spawn(move || {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            let _ = output_tx.send(TaskEvent::Line(line));
+        }
+    });
+    let error_tx = tx.clone();
+    let thread_err = thread::spawn(move || {
+        for line in BufReader::new(err).lines().map_while(Result::ok) {
+            let _ = error_tx.send(TaskEvent::Line(format!("! {line}")));
+        }
+    });
+    let exit = child.wait().map_err(|e| format!("Falha aguardando comando: {e}"))?;
+    let _ = thread_out.join();
+    let _ = thread_err.join();
+    if exit.success() { Ok(()) } else { Err(format!("Comando terminou com {exit}")) }
 }
 
-pub fn ensure_scripts_have_no_keys() -> bool {
-    !INSTALL.contains("gho_") && !SUPERVISOR.contains("gho_") && !DOCTOR.contains("gho_")
+pub fn start(task: Task, root: PathBuf, tx: Sender<TaskEvent>) {
+    thread::spawn(move || {
+        let _ = tx.send(TaskEvent::Line(format!("> {}", task.label())));
+        let result = match task {
+            Task::Install | Task::Doctor => {
+                let scripts = script_bundle();
+                match scripts {
+                    Err(err) => Err(err),
+                    Ok(base) => {
+                        let path = if matches!(task, Task::Install) {
+                            base.join("install.ps1")
+                        } else {
+                            base.join("scripts").join("doctor.ps1")
+                        };
+                        let mut cmd = hidden_process("powershell.exe");
+                        cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(path);
+                        if matches!(task, Task::Install) {
+                            if !root.is_dir() {
+                                let _ = tx.send(TaskEvent::Done(Err("Selecione uma pasta valida".into())));
+                                return;
+                            }
+                            cmd.arg("-WorkspacesRoot").arg(root);
+                        }
+                        let outcome = spawn_command(cmd, &tx);
+                        // Never delete the installed bridge script/config; only temporary copies.
+                        let _ = fs::remove_dir_all(base);
+                        outcome
+                    }
+                }
+            }
+            Task::CheckHealth => health(&tx),
+        };
+        let _ = tx.send(TaskEvent::Done(result));
+    });
+}
+
+fn check_url(url: &str) -> Result<u16, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(7))
+        .build().map_err(|e| e.to_string())?;
+    client.get(url).send().map(|r| r.status().as_u16()).map_err(|e| e.to_string())
+}
+fn health(tx: &Sender<TaskEvent>) -> Result<(), String> {
+    let local = "http://127.0.0.1:7676/healthz";
+    let local_status = check_url(local);
+    let _ = tx.send(TaskEvent::Line(format!("Local: {local} => {local_status:?}")));
+    let mcp = storage::mcp_url().ok_or("Ainda nao ha endpoint MCP configurado")?;
+    let public = format!("{}/healthz", mcp.trim_end_matches("/mcp"));
+    let public_status = check_url(&public);
+    let _ = tx.send(TaskEvent::Line(format!("HTTPS: {public} => {public_status:?}")));
+    let _ = tx.send(TaskEvent::Line("HTTP 200 apenas verifica rede. OAuth e ferramentas requerem teste no chat.".into()));
+    match (local_status, public_status) {
+        (Ok(200), Ok(200)) => Ok(()),
+        _ => Err("Conexao ainda nao esta saudavel. Veja diagnostico e Tailscale.".into()),
+    }
+}
+
+pub fn status_summary() -> String {
+    match storage::mcp_url() {
+        Some(url) => format!("Endpoint identificado: {url}\nOwner/OAuth deve ser autorizado no chat.\nO servidor continua no seu computador."),
+        None => "Ainda nao foi encontrada uma URL MCP valida.\nUse Configurar bridge para instalar e publicar.".into(),
+    }
+}
+
+pub fn stop_pid(pid: u32) -> Result<(), String> {
+    let mut cmd = hidden_process("taskkill.exe");
+    let result = cmd.args(["/PID", &pid.to_string(), "/T", "/F"]).output().map_err(|e| e.to_string())?;
+    if result.status.success() { Ok(()) } else { Err("Nao foi possivel cancelar o comando".into()) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn embedded_scripts_exist() {
+    fn bundle_contains_real_scripts() {
         assert!(INSTALL.contains("DevSpacePCBridge"));
+        assert!(DOCTOR.contains("healthz"));
         assert!(SUPERVISOR.contains("settings.json"));
         assert!(UNINSTALL.contains("Unregister-ScheduledTask"));
-        assert!(ensure_scripts_have_no_keys());
+    }
+    #[test]
+    fn platform_is_normal_chat() {
+        assert!(ChatClient::ChatGpt.instructions()[0].contains("ChatGPT"));
+        assert!(ChatClient::Claude.instructions()[0].contains("Claude"));
     }
 }

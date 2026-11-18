@@ -1,201 +1,85 @@
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    env, fs, io,
-    path::PathBuf,
-};
+use serde_json::Value;
+use std::{env, fs, io, path::{Path, PathBuf}};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Provider {
-    Codex,
-    ClaudeCode,
-    OpenAi,
-    Anthropic,
-    OpenRouter,
-    Ollama,
+pub enum ChatClient {
+    ChatGpt,
+    Claude,
 }
 
-impl Provider {
-    pub const ALL: [Self; 6] = [
-        Self::Codex,
-        Self::ClaudeCode,
-        Self::OpenAi,
-        Self::Anthropic,
-        Self::OpenRouter,
-        Self::Ollama,
-    ];
-
+impl ChatClient {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Codex => "Codex CLI (conta ChatGPT)",
-            Self::ClaudeCode => "Claude Code CLI (conta Claude)",
-            Self::OpenAi => "OpenAI API",
-            Self::Anthropic => "Anthropic API",
-            Self::OpenRouter => "OpenRouter API",
-            Self::Ollama => "Ollama (local)",
+            Self::ChatGpt => "ChatGPT (chat normal)",
+            Self::Claude => "Claude (chat normal)",
         }
     }
-
-    pub fn id(self) -> &'static str {
+    pub fn link(self) -> &'static str {
         match self {
-            Self::Codex => "codex",
-            Self::ClaudeCode => "claude_code",
-            Self::OpenAi => "openai",
-            Self::Anthropic => "anthropic",
-            Self::OpenRouter => "openrouter",
-            Self::Ollama => "ollama",
+            Self::ChatGpt => "https://chatgpt.com/plugins",
+            Self::Claude => "https://claude.ai/customize/connectors",
         }
     }
-
-    pub fn default_model(self) -> &'static str {
+    pub fn instructions(self) -> &'static [&'static str] {
         match self {
-            Self::Codex | Self::ClaudeCode => "",
-            Self::OpenAi => "gpt-4.1-mini",
-            Self::Anthropic => "claude-sonnet-4-5",
-            Self::OpenRouter => "openai/gpt-4.1-mini",
-            Self::Ollama => "llama3.2",
+            Self::ChatGpt => &[
+                "1. Abra ChatGPT > Plugins > + > Adicionar MCP personalizado.",
+                "2. Insira a URL HTTPS /mcp copiada do aplicativo.",
+                "3. Configure OAuth e autorize com a conta Owner do DevSpace.",
+                "4. Revise ferramentas e permissoes do plugin.",
+                "5. No chat, use @ para selecionar o plugin DevSpace.",
+                "Obs.: suporte a escrita depende do plano e politicas do ChatGPT.",
+            ],
+            Self::Claude => &[
+                "1. Abra Claude > Personalizar > Conectores > Adicionar.",
+                "2. Escolha Conector personalizado e cole a URL /mcp.",
+                "3. Escolha OAuth, autentique e autorize o DevSpace.",
+                "4. Habilite o conector na conversa com o Claude.",
+                "5. Solicite a leitura de um arquivo e confirme as permissoes.",
+                "Obs.: sao os chats normais; nao usa Claude Code.",
+            ],
         }
-    }
-
-    pub fn default_endpoint(self) -> &'static str {
-        match self {
-            Self::OpenAi => "https://api.openai.com/v1",
-            Self::Anthropic => "https://api.anthropic.com/v1",
-            Self::OpenRouter => "https://openrouter.ai/api/v1",
-            Self::Ollama => "http://127.0.0.1:11434",
-            _ => "",
-        }
-    }
-
-    pub fn requires_key(self) -> bool {
-        matches!(self, Self::OpenAi | Self::Anthropic | Self::OpenRouter)
-    }
-
-    pub fn is_agent(self) -> bool {
-        matches!(self, Self::Codex | Self::ClaudeCode)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProviderState {
-    pub model: String,
-    pub endpoint: String,
-    pub messages: Vec<Message>,
-    pub codex_session_id: Option<String>,
-    pub claude_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub provider: Provider,
-    pub root: PathBuf,
-    pub model: String,
-    pub endpoint: String,
-    pub allow_edits: bool,
-    pub messages: Vec<Message>,
-    pub codex_session_id: Option<String>,
-    pub claude_session_id: Option<String>,
-    pub previous_providers: BTreeMap<String, ProviderState>,
+    pub workspace: PathBuf,
+    pub client: ChatClient,
 }
-
 impl Default for Settings {
     fn default() -> Self {
-        Self {
-            provider: Provider::Codex,
-            root: default_root(),
-            model: String::new(),
-            endpoint: String::new(),
-            allow_edits: false,
-            messages: Vec::new(),
-            codex_session_id: None,
-            claude_session_id: None,
-            previous_providers: BTreeMap::new(),
-        }
+        Self { workspace: default_workspace(), client: ChatClient::ChatGpt }
     }
 }
-
 impl Settings {
     pub fn load() -> Self {
-        fs::read_to_string(settings_path())
-            .ok()
-            .and_then(|text| serde_json::from_str::<Self>(&text).ok())
-            .unwrap_or_default()
+        if let Ok(s) = fs::read_to_string(settings_path()) {
+            if let Ok(config) = serde_json::from_str::<Self>(&s) { return config; }
+        }
+        // v0.3 stored model chats in config.json. Never overwrite or delete it.
+        let old = settings_path().with_file_name("config.json");
+        let mut s = Self::default();
+        if let Ok(data) = fs::read_to_string(old) {
+            if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                if let Some(p) = v.get("root").and_then(Value::as_str) {
+                    if Path::new(p).is_dir() { s.workspace = PathBuf::from(p); }
+                }
+            }
+        }
+        s
     }
-
     pub fn save(&self) -> io::Result<()> {
         let path = settings_path();
-        let parent = path.parent().ok_or(io::Error::other("invalid settings directory"))?;
-        fs::create_dir_all(parent)?;
-        let body = serde_json::to_vec_pretty(self)?;
-        // Write atomically, so a crash cannot truncate the previous conversation.
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, body)?;
-        fs::rename(tmp, path)?;
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_vec_pretty(self)?)?;
+        fs::rename(temp, path)?;
         Ok(())
     }
-
-    pub fn model(&self) -> &str {
-        if self.model.trim().is_empty() {
-            self.provider.default_model()
-        } else {
-            self.model.trim()
-        }
-    }
-
-    pub fn endpoint(&self) -> &str {
-        if self.endpoint.trim().is_empty() {
-            self.provider.default_endpoint()
-        } else {
-            self.endpoint.trim()
-        }
-    }
-
-    pub fn switch_provider(&mut self, next: Provider) {
-        if self.provider != next {
-            self.previous_providers.insert(
-                self.provider.id().to_owned(),
-                ProviderState {
-                    model: self.model.clone(),
-                    endpoint: self.endpoint.clone(),
-                    messages: self.messages.clone(),
-                    codex_session_id: self.codex_session_id.clone(),
-                    claude_session_id: self.claude_session_id.clone(),
-                },
-            );
-            self.provider = next;
-            self.allow_edits = false;
-            let previous = self.previous_providers.remove(next.id()).unwrap_or_default();
-            self.model = previous.model;
-            self.endpoint = previous.endpoint;
-            self.messages = previous.messages;
-            self.codex_session_id = previous.codex_session_id;
-            self.claude_session_id = previous.claude_session_id;
-        }
-    }
-
-    pub fn new_chat(&mut self) {
-        self.messages.clear();
-        self.codex_session_id = None;
-        self.claude_session_id = None;
-    }
-}
-
-pub fn settings_path() -> PathBuf {
-    // APPDATA is user-specific: no secrets or session data in the Git working tree.
-    env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join("AppData").join("Roaming"))
-        .join("DevSpacePCBridge")
-        .join("config.json")
 }
 
 pub fn home() -> PathBuf {
@@ -204,112 +88,76 @@ pub fn home() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
-
-pub fn default_root() -> PathBuf {
+pub fn default_workspace() -> PathBuf {
     let user = home();
     [
         user.join("OneDrive").join("Documents").join("GitHub"),
         user.join("Documents").join("GitHub"),
         user.join("Documents"),
         user.clone(),
-    ]
-    .into_iter()
-    .find(|path| path.is_dir())
-    .unwrap_or(user)
+    ].into_iter().find(|p| p.is_dir()).unwrap_or(user)
+}
+pub fn settings_path() -> PathBuf {
+    env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join("AppData").join("Roaming"))
+        .join("DevSpacePCBridge")
+        .join("bridge-ui.json")
 }
 
-pub fn bridge_config_path() -> PathBuf {
-    home().join(".devspace").join("pc-bridge").join("settings.json")
-}
-
-pub fn devspace_mcp_url() -> Option<String> {
-    let base = home().join(".devspace");
-    for path in [bridge_config_path(), base.join("autostart").join("tailscale.json")] {
-        if let Some(hostname) = fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|value| value.get("hostname").and_then(|host| host.as_str()).map(str::to_owned))
-        {
-            if validate_ts_host(&hostname) {
-                return Some(format!("https://{hostname}/mcp"));
-            }
-        }
-    }
-    // Detect an existing DevSpace installation without rerunning the installer.
-    let config: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(base.join("config.jsonc")).ok()?
-    ).ok()?;
-    let origin = config.get("server")?.get("publicBaseUrl")?.as_str()?;
-    let host = origin.strip_prefix("https://")?.trim_end_matches('/');
-    validate_ts_host(host).then(|| format!("https://{host}/mcp"))
-}
-
-pub fn validate_ts_host(value: &str) -> bool {
-    value.ends_with(".ts.net")
-        && value.split('.').all(|part| {
+pub fn valid_tailscale_host(host: &str) -> bool {
+    host.ends_with(".ts.net")
+        && host.len() > ".ts.net".len()
+        && host.split('.').all(|part| {
             !part.is_empty()
                 && !part.starts_with('-')
                 && !part.ends_with('-')
-                && part
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                && part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         })
 }
-
-pub fn store_key(provider: Provider, secret: &str) -> Result<(), String> {
-    if !provider.requires_key() {
-        return Err("Este provedor nao usa chave API".into());
-    }
-    if secret.is_empty() {
-        return Err("Chave vazia".into());
-    }
-    keyring::Entry::new("DevSpacePCBridge", provider.id())
-        .map_err(|error| format!("Credenciais Windows: {error}"))?
-        .set_password(secret)
-        .map_err(|error| format!("Nao foi possivel armazenar chave: {error}"))
+fn valid_origin(origin: &str) -> Option<String> {
+    let hostname = origin.strip_prefix("https://")?.trim_end_matches('/');
+    valid_tailscale_host(hostname).then(|| format!("https://{hostname}/mcp"))
 }
 
-pub fn load_key(provider: Provider) -> Option<String> {
-    if !provider.requires_key() {
-        return None;
+/// Read the existing installation only. No authorization tokens are accessed.
+pub fn mcp_url() -> Option<String> {
+    let dir = home().join(".devspace");
+    for file in [dir.join("pc-bridge").join("settings.json"), dir.join("autostart").join("tailscale.json")] {
+        if let Ok(raw) = fs::read_to_string(file) {
+            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                if let Some(host) = v.get("hostname").and_then(Value::as_str) {
+                    if valid_tailscale_host(host) { return Some(format!("https://{host}/mcp")); }
+                }
+            }
+        }
     }
-    keyring::Entry::new("DevSpacePCBridge", provider.id())
-        .ok()?
-        .get_password()
-        .ok()
+    let raw = fs::read_to_string(dir.join("config.jsonc")).ok()?;
+    let json: Value = serde_json::from_str(&raw).ok()?;
+    valid_origin(json.get("server")?.get("publicBaseUrl")?.as_str()?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn provider_switch_resets_conversation_and_endpoint() {
-        let mut s = Settings::default();
-        s.messages.push(Message { role: "user".into(), content: "hello".into() });
-        s.codex_session_id = Some("abc".into());
-        s.switch_provider(Provider::Anthropic);
-        assert!(s.messages.is_empty());
-        assert_eq!(s.codex_session_id, None);
-        assert_eq!(s.model(), "claude-sonnet-4-5");
-        assert!(s.provider.requires_key());
-        s.switch_provider(Provider::Codex);
-        assert_eq!(s.messages[0].content, "hello");
-        assert_eq!(s.codex_session_id.as_deref(), Some("abc"));
+    fn known_host_only() {
+        assert!(valid_tailscale_host("pc.example.ts.net"));
+        assert!(!valid_tailscale_host("pc.ts.net.bad.tld"));
+        assert!(!valid_tailscale_host("pC.example.ts.net"));
+        assert!(!valid_tailscale_host("pc.example.ts.net/evil"));
+        assert_eq!(valid_origin("https://pc.example.ts.net"), Some("https://pc.example.ts.net/mcp".into()));
     }
-
     #[test]
-    fn hostname_validation() {
-        assert!(validate_ts_host("pc.tail123.ts.net"));
-        assert!(!validate_ts_host("pc.tail123.ts.net/evil"));
-        assert!(!validate_ts_host("a..ts.net"));
-        assert!(!validate_ts_host("PC.tail.ts.net"));
+    fn config_does_not_contain_api_or_chat_state() {
+        let content = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!content.contains("api_key"));
+        assert!(!content.contains("messages"));
+        assert!(!content.contains("codex"));
     }
-
     #[test]
-    fn no_secrets_in_settings() {
-        let settings = serde_json::to_string(&Settings::default()).unwrap();
-        assert!(!settings.contains("api_key"));
-        assert!(!settings.contains("secret"));
+    fn both_clients_point_to_normal_chats() {
+        assert!(ChatClient::ChatGpt.link().starts_with("https://chatgpt.com/"));
+        assert!(ChatClient::Claude.link().starts_with("https://claude.ai/"));
     }
 }
