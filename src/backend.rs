@@ -34,7 +34,15 @@ pub fn spawn_chat(settings: Settings, sender: Sender<WorkerEvent>, cancelled: Ar
 }
 
 fn command_hidden(command: &str) -> Command {
-    let mut cmd = Command::new(command);
+    #[cfg(windows)]
+    let executable = match command {
+        "codex" => "codex.cmd",
+        "claude" => "claude.cmd",
+        other => other,
+    };
+    #[cfg(not(windows))]
+    let executable = command;
+    let mut cmd = Command::new(executable);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

@@ -36,6 +36,7 @@ O cliente Rust não contorna permissões, não compartilha cookies nem transform
 | Ctrl+P / Ctrl+S / Ctrl+L | Abrir Provedores / Setup / Logs |
 | Ctrl+N | Novo chat |
 | Ctrl+Q | Sair quando não há tarefas executando |
+| Ctrl+X | Solicitar cancelamento de CLI ou instalação em execução |
 | Esc | Voltar ao Chat ou cancelar edição |
 | F1 | Ajuda |
 | Provedores: P / M / E / K | Pasta / Modelo / Endpoint / Chave API |

@@ -65,7 +65,15 @@ fn bundled_scripts() -> Result<PathBuf, String> {
 }
 
 fn hidden_command(name: &str) -> Command {
-    let mut command = Command::new(name);
+    #[cfg(windows)]
+    let executable = match name {
+        "codex" => "codex.cmd",
+        "claude" => "claude.cmd",
+        other => other,
+    };
+    #[cfg(not(windows))]
+    let executable = name;
+    let mut command = Command::new(executable);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

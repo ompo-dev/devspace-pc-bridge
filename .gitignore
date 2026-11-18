@@ -9,6 +9,7 @@ tailscale.json
 logs/
 node_modules/
 dist/
+dist-*/
 target/
 .devspace/
 *.pem
