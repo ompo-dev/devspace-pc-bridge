@@ -32,6 +32,12 @@ A instalação configura os pré-requisitos necessários via WinGet/npm, como No
 
 **Para instalações existentes:** o aplicativo procura o endereço MCP já configurado no computador, sem recriar credenciais. Para diagnosticar, pressione **D**; para conferir a rede, **T**. Não execute outra instalação sobre um servidor já configurado antes de revisar o estado atual.
 
+**Versão do DevSpace:** a instalação usa a versão testada com o bridge (1.1.1), e não a mais recente do npm. Se já existir outra versão, o instalador apenas avisa e não altera nada.
+
+**Pastas recusadas:** a instalação e a tela Configurar recusam a raiz de um disco, a pasta pessoal inteira, pastas que a contêm e pastas de credenciais (.ssh, .aws, .gnupg, .kube, .claude, .codex, .devspace, AppData). Use uma pasta de projetos. Quem precisar pode usar `install.ps1 -AllowBroadRoot`, sob sua responsabilidade.
+
+**Desinstalar:** em Configurar, pressione **U** e digite **REMOVER** para apagar só a tarefa agendada. Digite **REMOVER FUNNEL** para também desativar o Funnel. Como o `tailscale funnel reset` apaga todas as regras de Funnel e Serve da máquina, o script se recusa se houver outras portas publicadas (repita com `-Force` para confirmar). Configurações, credenciais, DevSpace, Node, Git e Tailscale são preservados.
+
 ## Conectar ao chat que você já usa
 
 ### ChatGPT
@@ -60,19 +66,22 @@ Veja o [guia oficial da Anthropic](https://support.claude.com/en/articles/111751
 | Conectar: C / O / P | Copiar URL / abrir chat / abrir painel Owner |
 | Configurar: R / I | Editar raiz de projetos / iniciar instalação |
 | Configurar: D / T | Diagnóstico / testar saúde HTTPS |
+| Configurar: U | Remover a tarefa do bridge (confirmar com REMOVER ou REMOVER FUNNEL) |
+
+As letras de atalho funcionam com Caps Lock ou Shift. A barra inferior mostra ONLINE, OFFLINE ou NÃO CONFIGURADO, atualizado a cada 30 segundos.
 
 **Todas as telas do aplicativo são Ratatui**, e os comandos ficam em segundo plano com logs na própria TUI. O sistema ainda pode abrir o navegador para OAuth ou solicitar uma aprovação administrativa. Isso é independente do terminal do aplicativo.
 
 ## Segurança
 
 - **Funnel expõe uma URL pública:** só publique quando entender os riscos; a autenticação deve permanecer ativa.
-- Não remova a proteção Owner/OAuth do DevSpace e evite permitir acesso a todo o disco.
+- Não remova a proteção Owner/OAuth do DevSpace e evite permitir acesso a todo o disco. O bridge recusa raízes amplas, e o diagnóstico avisa se o `allowedRoots` do DevSpace está amplo demais.
 - A TUI **não simula** políticas de permissões. Controle de leitura/escrita pertence ao servidor MCP, ao usuário do Windows e às permissões do cliente ChatGPT/Claude.
 - Uma resposta HTTP 200 de /healthz confirma rede, **não** uma sessão MCP autenticada nem a permissão de editar arquivos.
 - Qualquer ferramenta que modifica arquivos deve ser revisada antes de usá-la. Confirme pedidos de escrita no cliente.
 - O instalador preserva configurações existentes e nunca publica auth.json, tokens ou senhas no Git. Saídas de instalação são exibidas na TUI apenas na memória; não compartilhe logs que possam conter dados sensíveis.
 - A presença de um endpoint público não significa que ChatGPT ou Claude já tenham sido conectados: a configuração OAuth precisa ser concluída em cada plataforma.
-- A distribuição atual do Windows não é assinada digitalmente.
+- A distribuição atual do Windows não é assinada digitalmente. Cada release traz um arquivo `.sha256`; confira com `(Get-FileHash .\DevSpacePCBridge.exe -Algorithm SHA256).Hash` antes de executar.
 
 ## Limitações verificadas
 
@@ -88,7 +97,7 @@ Este programa não incorpora o código do OpenClaude, Codex ou Claude Code. **Ne
 O executável é gerado em target/release/DevSpacePCBridge.exe. Testes e releases são feitos por GitHub Actions em Windows.
 
     DevSpacePCBridge.exe --version
-    DevSpacePCBridge.exe --doctor
+    DevSpacePCBridge.exe --doctor    # código de saída 0 = saudável, 1 = indisponível
     .\tests\validate.ps1
 
 Os scripts PowerShell em install.ps1 e scripts/ são incorporados ao executável Rust. As preferências da TUI ficam em %APPDATA%\DevSpacePCBridge\bridge-ui.json. Dados anteriores em config.json são preservados.

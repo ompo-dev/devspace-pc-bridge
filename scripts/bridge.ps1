@@ -8,6 +8,8 @@ $settingsFile = Join-Path $base 'settings.json'
 $logDir = Join-Path $base 'logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $logFile = Join-Path $logDir 'bridge.log'
+$maxServerLogs = 10
+$maxBridgeLogBytes = 1MB
 function Log([string]$message) { Add-Content -LiteralPath $logFile -Value ("{0} {1}" -f (Get-Date -Format 'o'), $message) }
 function Healthy([string]$url) {
     try { return (Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 6).StatusCode -eq 200 }
@@ -19,6 +21,19 @@ function Find-Tailscale {
     $path = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
     if (Test-Path $path) { return $path }
     return $null
+}
+# Every DevSpace start creates a new pair of logs, so keep only the most recent ones.
+function Remove-OldLogs {
+    $current = Get-Item -LiteralPath $logFile -ErrorAction SilentlyContinue
+    if ($current -and $current.Length -gt $maxBridgeLogBytes) {
+        Move-Item -LiteralPath $logFile -Destination "$logFile.1" -Force
+    }
+    foreach ($pattern in @('devspace-*.out.log', 'devspace-*.err.log')) {
+        Get-ChildItem -LiteralPath $logDir -Filter $pattern -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -Skip $maxServerLogs |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 }
 if (-not (Test-Path -LiteralPath $settingsFile)) { throw 'settings.json ausente. Execute install.ps1.' }
 $settings = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
@@ -36,8 +51,12 @@ try {
     Log 'Supervisor iniciado.'
     $server = $null
     $lastHealth = ''
+    # Back off while DevSpace keeps failing to come up: 30s, 60s, 120s ... capped at 10 minutes.
+    $startFailures = 0
+    $nextStart = [datetime]::MinValue
     do {
         try {
+            Remove-OldLogs
             $ts = Find-Tailscale
             if ($ts) {
                 $status = (& $ts funnel status --json 2>$null | Out-String)
@@ -47,19 +66,26 @@ try {
                     if ($LASTEXITCODE -ne 0) { Log 'Funnel nao restaurado; pode exigir permissoes.' }
                 }
             }
-            if (-not (Healthy $localHealth)) {
+            if (Healthy $localHealth) {
+                $startFailures = 0
+                $nextStart = [datetime]::MinValue
+            } else {
                 $cmd = Get-Command devspace.cmd -ErrorAction SilentlyContinue
                 $node = Get-Command node.exe -ErrorAction SilentlyContinue
                 if ($server) { $server.Refresh() }
                 $listening = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue).Count -gt 0
-                if (-not $listening -and $node -and $cmd -and (-not $server -or $server.HasExited)) {
+                $mayStart = (Get-Date) -ge $nextStart
+                if (-not $listening -and $node -and $cmd -and (-not $server -or $server.HasExited) -and $mayStart) {
                     $js = Join-Path (Split-Path $cmd.Source -Parent) 'node_modules\@waishnav\devspace\bin\devspace.js'
                     if (Test-Path $js) {
                         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
                         $out = Join-Path $logDir "devspace-$stamp.out.log"
                         $err = Join-Path $logDir "devspace-$stamp.err.log"
                         $server = Start-Process -FilePath $node.Source -ArgumentList ('"' + $js + '" serve') -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-                        Log 'DevSpace iniciado.'
+                        $delay = [Math]::Min(30 * [Math]::Pow(2, $startFailures), 600)
+                        $startFailures++
+                        $nextStart = (Get-Date).AddSeconds($delay)
+                        Log ("DevSpace iniciado (tentativa {0}; nova tentativa so apos {1}s sem health)." -f $startFailures, $delay)
                     } else { Log 'Arquivo DevSpace nao encontrado.' }
                 } elseif ($listening) { Log 'Porta ocupada, health falhou; nao iniciando servidor duplicado.' }
             }

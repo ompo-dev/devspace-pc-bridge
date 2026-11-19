@@ -12,13 +12,29 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
+      # The release only gets published if everything CI checks also passes here.
+      - name: Script checks
+        shell: pwsh
+        run: ./tests/validate.ps1
+      - name: Rust toolchain
+        run: rustup component add rustfmt clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
       - name: Test Rust application
         run: cargo test
       - name: Build EXE
         run: cargo build --release
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $exe = 'target/release/DevSpacePCBridge.exe'
+          $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+          "$hash  DevSpacePCBridge.exe" | Set-Content -Encoding ascii "$exe.sha256"
       - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME target/release/DevSpacePCBridge.exe --title "DevSpace PC Bridge $env:GITHUB_REF_NAME" --generate-notes --verify-tag
+          gh release create $env:GITHUB_REF_NAME target/release/DevSpacePCBridge.exe target/release/DevSpacePCBridge.exe.sha256 --title "DevSpace PC Bridge $env:GITHUB_REF_NAME" --generate-notes --verify-tag

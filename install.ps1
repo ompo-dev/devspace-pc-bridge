@@ -3,7 +3,8 @@
 param(
     [string]$WorkspacesRoot = (Split-Path -Parent $PSScriptRoot),
     [switch]$Check,
-    [switch]$SkipPackageInstall
+    [switch]$SkipPackageInstall,
+    [switch]$AllowBroadRoot
 )
 
 Set-StrictMode -Version Latest
@@ -11,6 +12,9 @@ $ErrorActionPreference = 'Stop'
 $taskName = 'DevSpacePCBridge'
 $port = 7676
 $installDir = Join-Path $env:USERPROFILE '.devspace\pc-bridge'
+# Version this bridge was tested with. Pinned so a public-facing server is not
+# silently replaced by whatever is newest on npm.
+$DevSpaceVersion = '1.1.1'
 
 function Refresh-Path {
     $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
@@ -20,6 +24,18 @@ function Find-Tailscale {
     if ($cmd) { return $cmd.Source }
     $fallback = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
     if (Test-Path $fallback) { return $fallback }
+    return $null
+}
+function Get-BroadRootReason([string]$Path) {
+    try { $full = [IO.Path]::GetFullPath($Path).TrimEnd('\') } catch { return 'caminho invalido' }
+    $profileDir = $env:USERPROFILE.TrimEnd('\')
+    if ($full.Length -le 2) { return 'raiz de um disco' }
+    if ($full -ieq $profileDir) { return 'pasta pessoal inteira' }
+    if ($profileDir.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase)) { return 'pasta que contem a pasta pessoal' }
+    $sensitive = @('.ssh', '.aws', '.gnupg', '.kube', '.claude', '.codex', '.devspace', 'appdata')
+    foreach ($part in $full.Split('\')) {
+        if ($sensitive -contains $part.ToLowerInvariant()) { return 'pasta com credenciais de ferramentas' }
+    }
     return $null
 }
 function Ensure-Package([string]$Command, [string]$Package) {
@@ -39,6 +55,7 @@ if ($Check) {
         Write-Host ("  {0}: {1}" -f $name, [bool](Get-Command $name -ErrorAction SilentlyContinue))
     }
     Write-Host ("  Tailscale: {0}" -f [bool](Find-Tailscale))
+    Write-Host ("  DevSpace testado: {0}" -f $DevSpaceVersion)
     Write-Host ("  Config existente: {0}" -f (Test-Path (Join-Path $env:USERPROFILE '.devspace\config.jsonc')))
     Write-Host ("  Tarefa deste projeto: {0}" -f [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue))
     return
@@ -49,8 +66,15 @@ $admin = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Warning 'Sem privilegios de administrador. Pacotes e Tailscale podem solicitar confirmacao UAC.'
 }
+# Rust's canonicalize yields \\?\C:\... paths; Resolve-Path and DevSpace prefer plain ones.
+$WorkspacesRoot = $WorkspacesRoot -replace '^\\\\\?\\', ''
 $root = (Resolve-Path -LiteralPath $WorkspacesRoot -ErrorAction Stop).Path
 if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "Raiz invalida: $root" }
+$broadReason = Get-BroadRootReason $root
+if ($broadReason -and -not $AllowBroadRoot) {
+    throw "Raiz recusada ($broadReason): $root. Escolha a pasta dos seus projetos, ou use -AllowBroadRoot sob sua responsabilidade."
+}
+if ($broadReason) { Write-Warning "Raiz ampla permitida por -AllowBroadRoot ($broadReason). O Funnel expoe esta pasta na internet." }
 
 Ensure-Package 'git.exe' 'Git.Git'
 Ensure-Package 'node.exe' 'OpenJS.NodeJS.LTS'
@@ -69,13 +93,21 @@ if (-not (Find-Tailscale)) {
 $tailscale = Find-Tailscale
 if (-not $tailscale) { throw 'Tailscale nao encontrado; abra novo terminal e repita.' }
 if (-not (Get-Command devspace.cmd -ErrorAction SilentlyContinue)) {
-    Write-Host 'Instalando DevSpace oficial...'
-    & npm.cmd install --global '@waishnav/devspace'
+    Write-Host "Instalando DevSpace oficial $DevSpaceVersion..."
+    & npm.cmd install --global "@waishnav/devspace@$DevSpaceVersion"
     if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar @waishnav/devspace.' }
     Refresh-Path
 }
-if (-not (Get-Command devspace.cmd -ErrorAction SilentlyContinue)) {
+$devspaceCmd = Get-Command devspace.cmd -ErrorAction SilentlyContinue
+if (-not $devspaceCmd) {
     throw 'devspace.cmd nao encontrado. Abra novo terminal e repita.'
+}
+$devspacePackage = Join-Path (Split-Path $devspaceCmd.Source -Parent) 'node_modules\@waishnav\devspace\package.json'
+if (Test-Path -LiteralPath $devspacePackage) {
+    $installedVersion = (Get-Content -LiteralPath $devspacePackage -Raw | ConvertFrom-Json).version
+    if ($installedVersion -ne $DevSpaceVersion) {
+        Write-Warning "DevSpace $installedVersion instalado; versao testada com o bridge: $DevSpaceVersion. Nada foi alterado."
+    }
 }
 
 $tsStatus = $null
