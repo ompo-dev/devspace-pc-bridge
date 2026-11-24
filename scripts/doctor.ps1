@@ -58,6 +58,16 @@ if (-not $tailscale) {
 Write-Host ("Tailscale: {0}" -f $(if ($tailscale) { 'OK' } else { 'AUSENTE' }))
 $task = Get-ScheduledTask -TaskName DevSpacePCBridge -ErrorAction SilentlyContinue
 Write-Host ("Tarefa DevSpacePCBridge: {0}" -f $(if ($task) { $task.State } else { 'AUSENTE' }))
+$bridgeDir = Join-Path $env:USERPROFILE '.devspace\pc-bridge'
+if (Test-Path -LiteralPath (Join-Path $bridgeDir 'paused')) { Write-Host 'Publicacao: PAUSADA (arquivo paused presente)' }
+$untilPath = Join-Path $bridgeDir 'expose-until'
+if (Test-Path -LiteralPath $untilPath) {
+    $untilRaw = (Get-Content -LiteralPath $untilPath -Raw)
+    $untilSeconds = 0L
+    if ($untilRaw -and [long]::TryParse($untilRaw.Trim(), [ref]$untilSeconds)) {
+        Write-Host ('Exposicao ate: {0}' -f [DateTimeOffset]::FromUnixTimeSeconds($untilSeconds).LocalDateTime)
+    }
+}
 if ($settings) {
     Write-Host ("Hostname: {0}" -f $settings.hostname)
     Write-Host ("Raiz: {0}" -f $settings.root)

@@ -149,6 +149,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Funnel falhou. Habilite Funnel/HTTPS no Tailsc
 
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'scripts\bridge.ps1') -Destination (Join-Path $installDir 'bridge.ps1') -Force
+# Installing is an explicit decision to publish, so a previous pause or deadline no longer applies.
+Remove-Item -LiteralPath (Join-Path $installDir 'paused') -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $installDir 'expose-until') -Force -ErrorAction SilentlyContinue
 @{ hostname = $hostname; port = $port; root = $root; installedAt = (Get-Date).ToString('o') } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $installDir 'settings.json') -Encoding UTF8
 

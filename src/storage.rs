@@ -305,6 +305,67 @@ fn mcp_url_in(dir: &Path) -> Option<String> {
     valid_origin(json.get("server")?.get("publicBaseUrl")?.as_str()?)
 }
 
+/// Markers shared with `scripts/bridge.ps1`, which runs from the same folder:
+/// `paused` (publishing is off on purpose) and `expose-until` (Unix seconds).
+pub struct BridgeState {
+    dir: PathBuf,
+}
+impl Default for BridgeState {
+    fn default() -> Self {
+        Self {
+            dir: home().join(".devspace").join("pc-bridge"),
+        }
+    }
+}
+impl BridgeState {
+    #[cfg(test)]
+    pub fn in_dir(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+    fn paused_file(&self) -> PathBuf {
+        self.dir.join("paused")
+    }
+    fn until_file(&self) -> PathBuf {
+        self.dir.join("expose-until")
+    }
+    pub fn paused(&self) -> bool {
+        self.paused_file().is_file()
+    }
+    pub fn set_paused(&self, paused: bool) -> io::Result<()> {
+        if paused {
+            fs::create_dir_all(&self.dir)?;
+            fs::write(self.paused_file(), "paused by DevSpace PC Bridge\n")
+        } else {
+            remove_if_exists(&self.paused_file())
+        }
+    }
+    pub fn expose_until(&self) -> Option<u64> {
+        fs::read_to_string(self.until_file())
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+    pub fn set_expose_until(&self, until: Option<u64>) -> io::Result<()> {
+        match until {
+            Some(seconds) => {
+                fs::create_dir_all(&self.dir)?;
+                fs::write(self.until_file(), seconds.to_string())
+            }
+            None => remove_if_exists(&self.until_file()),
+        }
+    }
+}
+fn remove_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +382,34 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    #[test]
+    fn bridge_state_round_trips_through_files() {
+        let dir = scratch_dir("state");
+        let state = BridgeState::in_dir(dir.join("nested"));
+        assert!(!state.paused());
+        assert_eq!(state.expose_until(), None);
+        state.set_paused(true).unwrap();
+        state.set_expose_until(Some(1_700_000_000)).unwrap();
+        assert!(state.paused());
+        assert_eq!(state.expose_until(), Some(1_700_000_000));
+        state.set_paused(false).unwrap();
+        state.set_expose_until(None).unwrap();
+        // Removing what is already gone is not an error.
+        state.set_paused(false).unwrap();
+        assert!(!state.paused());
+        assert_eq!(state.expose_until(), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn garbage_deadline_is_ignored() {
+        let dir = scratch_dir("garbage");
+        fs::write(dir.join("expose-until"), "soon").unwrap();
+        assert_eq!(BridgeState::in_dir(dir.clone()).expose_until(), None);
+        fs::write(dir.join("expose-until"), " 42\r\n").unwrap();
+        assert_eq!(BridgeState::in_dir(dir.clone()).expose_until(), Some(42));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

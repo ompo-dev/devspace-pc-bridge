@@ -8,6 +8,10 @@ $settingsFile = Join-Path $base 'settings.json'
 $logDir = Join-Path $base 'logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $logFile = Join-Path $logDir 'bridge.log'
+# Markers shared with DevSpacePCBridge.exe: publishing paused on purpose, and a
+# deadline (Unix seconds) after which publishing is paused automatically.
+$pausedFlag = Join-Path $base 'paused'
+$untilFile = Join-Path $base 'expose-until'
 $maxServerLogs = 10
 $maxBridgeLogBytes = 1MB
 function Log([string]$message) { Add-Content -LiteralPath $logFile -Value ("{0} {1}" -f (Get-Date -Format 'o'), $message) }
@@ -21,6 +25,29 @@ function Find-Tailscale {
     $path = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
     if (Test-Path $path) { return $path }
     return $null
+}
+function Get-ExposeUntil {
+    if (-not (Test-Path -LiteralPath $untilFile)) { return $null }
+    $raw = Get-Content -LiteralPath $untilFile -Raw
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    $parsed = 0L
+    if ([long]::TryParse($raw.Trim(), [ref]$parsed)) { return $parsed }
+    return $null
+}
+# "funnel reset" is the only documented way to drop a rule and it clears all of them,
+# so it is used only when this bridge's port is the only thing published.
+function Stop-Funnel([string]$tailscale) {
+    $status = (& $tailscale funnel status 2>$null | Out-String)
+    $ports = @([regex]::Matches($status, '(?:127\.0\.0\.1|localhost):(\d+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    if ($ports.Count -eq 0) { return }
+    $others = @($ports | Where-Object { $_ -ne [string]$port })
+    if ($others.Count -gt 0) {
+        Log ("Pausa nao aplicada: o Funnel tambem publica outras portas ({0}); 'funnel reset' apagaria tudo." -f ($others -join ', '))
+        return
+    }
+    & $tailscale funnel reset 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { Log 'Nao foi possivel desativar o Funnel durante a pausa.' }
+    else { Log 'Funnel desativado pela pausa.' }
 }
 # Every DevSpace start creates a new pair of logs, so keep only the most recent ones.
 function Remove-OldLogs {
@@ -57,8 +84,19 @@ try {
     do {
         try {
             Remove-OldLogs
+            $until = Get-ExposeUntil
+            $paused = Test-Path -LiteralPath $pausedFlag
+            if (-not $paused -and $null -ne $until -and [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge $until) {
+                Log 'Prazo de exposicao encerrado; pausando a publicacao.'
+                Set-Content -LiteralPath $pausedFlag -Value 'expired'
+                Remove-Item -LiteralPath $untilFile -Force -ErrorAction SilentlyContinue
+                $paused = $true
+            }
             $ts = Find-Tailscale
-            if ($ts) {
+            if ($ts -and $paused) {
+                # Checked every cycle so a Funnel switched on by hand during a pause is closed again.
+                Stop-Funnel $ts
+            } elseif ($ts) {
                 $status = (& $ts funnel status --json 2>$null | Out-String)
                 if ($status -notmatch [regex]::Escape($hostname) -or $status -notmatch "127\.0\.0\.1:$port") {
                     Log 'Funnel ausente; tentativa de restauracao.'
@@ -89,7 +127,7 @@ try {
                     } else { Log 'Arquivo DevSpace nao encontrado.' }
                 } elseif ($listening) { Log 'Porta ocupada, health falhou; nao iniciando servidor duplicado.' }
             }
-            $health = if ((Healthy $localHealth) -and (Healthy $publicHealth)) { 'healthy' } else { 'unavailable' }
+            $health = if ($paused) { 'paused' } elseif ((Healthy $localHealth) -and (Healthy $publicHealth)) { 'healthy' } else { 'unavailable' }
             if ($health -ne $lastHealth) { Log "Estado: $health"; $lastHealth = $health }
         } catch { Log "Erro: $($_.Exception.Message)" }
         if (-not $Once) { Start-Sleep -Seconds 30 }

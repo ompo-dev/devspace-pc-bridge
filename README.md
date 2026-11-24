@@ -22,6 +22,86 @@ O modelo continua rodando no ChatGPT/Claude. É o servidor MCP que disponibiliza
 
 ## Instalação
 
+### Instalador Windows, WinGet e assinatura
+
+Além do executável portátil, as próximas releases são configuradas para publicar
+`DevSpacePCBridge-Setup.exe` (instalador NSIS de escopo do usuário), o respectivo
+SHA-256 e `winget-manifests.zip`. **O executável e o instalador funcionam sem
+assinatura digital**, mas o Windows/SmartScreen pode alertar: verifique o hash e
+a origem. Não há assinatura confiável sem um certificado real; não usamos
+certificados falsos nem desativamos a proteção do Windows. O instalador só copia
+o bridge e cria o atalho/menu Desinstalar: nunca apaga DevSpace, OAuth ou projetos.
+
+Os manifestos WinGet são gerados com o hash efetivo de cada instalador e URL
+da release. **Isso ainda não é publicação na fonte pública do WinGet**: depende
+de a release estar disponível e de um PR aceito no repositório `winget-pkgs`.
+O pipeline só gera o pacote, sem enviar PR automaticamente.
+
+Para compilar o instalador localmente: `cargo build --release`, depois execute
+`makensis packaging/DevSpacePCBridge.nsi` com NSIS instalado.
+
+### Dependências individualmente
+
+Na tela **Configurar**, use `1` (Git), `2` (Node), `3` (Tailscale),
+`4` (Cloudflared) ou `5` (DevSpace). Confirme digitando `INSTALAR GIT`,
+`INSTALAR NODE`, etc. Cada operação verifica a instalação, evita reinstalar
+um programa existente e mostra o progresso e possíveis erros em **Logs**.
+WinGet instala pacotes oficiais e npm instala apenas a versão fixada do
+DevSpace. Para conferir sem instalar: `scripts/install-component.ps1 -Check`.
+Login, permissões administrativas e exposição pública permanecem decisões
+separadas; uma dependência instalada não implica acesso remoto ativo.
+
+### Bandeja do Windows
+
+Enquanto o aplicativo estiver aberto, um ícone fica na bandeja do Windows.
+Na tela inicial, pressione `M` para ocultar o terminal; clique duas vezes no
+ícone ou selecione **Mostrar terminal** para voltar. O menu também permite
+**Desligar desktop remoto** (encerra o túnel, desliga o controle e revoga os
+clientes) e **Sair**. Alguns terminais modernos não fornecem uma janela Win32
+ocultável: nesses casos o programa deixa o terminal visível em vez de escondê-lo
+sem forma de restaurá-lo.
+
+### Desktop remoto e captura de janelas
+
+O aplicativo inicia um servidor MCP adicional **somente em
+`http://127.0.0.1:7677/mcp`**, independente do DevSpace existente na porta
+7676. Esse servidor implementa as funções novas: `desktop_status`,
+`desktop_list_windows`, `desktop_screenshot`, `desktop_inspect`,
+`desktop_click`, `desktop_type`, `desktop_key` e `desktop_scroll`.
+
+Na aba **Desktop remoto**, você pode liberar/remover executáveis por nome
+(`A`/`X`), alternar captura (`V`) e entrada (`I`), ativar por prazo (`E`,
+confirme `ATIVAR 30`), desativar (`B`) e revogar todos os tokens (`R`).
+O acesso começa **desligado** em toda execução, e nenhuma janela fica
+disponível por padrão. Senhas, gerenciadores de senhas, terminais e títulos
+suspeitos são bloqueados, com limite de ações e logs de auditoria.
+
+Para permitir acesso de um chat ao desktop, pressione `P` e confirme
+`PUBLICAR DESKTOP`. O aplicativo inicia um **Cloudflare Quick Tunnel**
+temporário, sem necessidade de conta, mostra a URL HTTPS terminada em `/mcp`
+e preserva OAuth/PKCE. Abra `C` para obter o PIN de pareamento local e conclua
+o fluxo OAuth no navegador, **sem colar o PIN no chat**. `S` para encerrar o
+túnel imediatamente. O Quick Tunnel muda de endereço ao reiniciar e não é
+indicado para operação permanente. O túnel e o acesso ao desktop são encerrados
+ao sair do aplicativo. Não é uma substituição do Funnel/Owner do DevSpace.
+
+Windows tem um único foco e um cursor global. O backend de desktop envia
+ações via UI Automation/mensagens direcionadas ao aplicativo permitido, sem
+`SendInput` e sem mover o cursor físico. É um método best-effort, **não um
+segundo mouse independente**: jogos, apps com entrada bruta, janelas minimizadas
+ou GPU protegida podem não responder ou permitir screenshot. Nunca captura
+deliberadamente a área de trabalho inteira. Capturas podem conter dados
+sensíveis visíveis na janela autorizada, portanto libere somente apps seguros.
+
+Teste seguro do servidor local, sem liberar qualquer app:
+`DevSpacePCBridge.exe --desktop-doctor` (HTTP 200 para health e metadados,
+401 para MCP sem token e 421 para Host externo).
+
+**Gateway unificado:** o DevSpace e o MCP de desktop continuam servidores
+distintos, cada um com sua própria autenticação; ainda não há um gateway que
+mescle as ferramentas em um único endpoint OAuth. Não conecte um proxy
+desprotegido na tentativa de uni-los.
+
 1. Baixe **DevSpacePCBridge.exe** na página de [Releases](https://github.com/ompo-dev/devspace-pc-bridge/releases). Abra-o no Windows 10 ou 11; **não é preciso instalar Rust**.
 2. Vá a **Configurar** (Tab ou Ctrl+S), escolha a pasta que os agentes poderão utilizar e inicie a instalação com **I**. Confirme digitando **PUBLICAR** — o Funnel disponibiliza um endereço HTTPS na internet.
 3. Conclua as autorizações do Windows, Tailscale e o registro Owner do DevSpace, quando solicitados.
@@ -67,8 +147,31 @@ Veja o [guia oficial da Anthropic](https://support.claude.com/en/articles/111751
 | Configurar: R / I | Editar raiz de projetos / iniciar instalação |
 | Configurar: D / T | Diagnóstico / testar saúde HTTPS |
 | Configurar: U | Remover a tarefa do bridge (confirmar com REMOVER ou REMOVER FUNNEL) |
+| Início: P | Pausar a publicação (desliga o Funnel) |
+| Início: R | Retomar a publicação (digite PUBLICAR ou PUBLICAR 60) |
+| Início: K | Checkpoint git dos projetos |
+| Início: T / D | Testar HTTPS e OAuth / diagnóstico |
+| Logs: Y | Copiar logs sem hostname, usuário e tokens |
 
-As letras de atalho funcionam com Caps Lock ou Shift. A barra inferior mostra ONLINE, OFFLINE ou NÃO CONFIGURADO, atualizado a cada 30 segundos.
+As letras de atalho funcionam com Caps Lock ou Shift. A barra inferior mostra o estado, atualizado a cada 30 segundos: ONLINE, OFFLINE, NÃO CONFIGURADO, PAUSADO, ALERTA: SEM OAUTH ou PAUSA NÃO EFETIVA. A tela inicial também traz a disponibilidade da última hora, um checklist (Git, Node.js, DevSpace, Tailscale, servidor local, HTTPS e OAuth) e avisa quando há uma versão nova.
+
+## Pausa, prazo e proteção
+
+- **Teste de proteção (T):** o bridge chama o `/mcp` público **sem token**. `401`/`403` significa que o OAuth está ativo. Um `2xx` significa que o endpoint está aberto: a barra mostra ALERTA e o `--doctor` sai com código 2.
+- **Pausar (P):** desliga o Funnel e grava a marca `paused`; o supervisor deixa de religar o Funnel. O servidor local continua rodando, só a internet deixa de alcançar o PC. O Tailscale instalado só documenta `funnel reset` para remover regras, e ele apaga **todas**; por isso a pausa só é aplicada quando a porta do bridge é a única publicada. Se houver outras, o bridge avisa que o Funnel continua ligado.
+- **Retomar (R):** digite `PUBLICAR` para ficar ativo sem prazo, ou `PUBLICAR 60` para pausar sozinho em 60 minutos (1 a 1440). O prazo é respeitado pelo aplicativo e pelo supervisor.
+- Uma nova instalação (`I`) limpa pausa e prazo, pois é uma decisão explícita de publicar.
+
+## Checkpoints git
+
+Antes de liberar escrita a um chat, pressione **K** (ou rode `DevSpacePCBridge.exe --checkpoint [pasta]`). Para cada repositório git na pasta de projetos o bridge guarda um ponto de restauração com os arquivos atuais, inclusive os não versionados (respeitando o `.gitignore`).
+
+O snapshot usa um índice temporário: não altera seu índice, seus arquivos, seu branch nem o `git stash`. Fica em `refs/devspace-checkpoints/`, que nenhuma listagem de branches mostra, e os 20 mais recentes de cada repositório são mantidos. Arquivos não versionados entram no objeto do repositório, que cresce um pouco.
+
+    DevSpacePCBridge.exe --checkpoints <repositório>
+    DevSpacePCBridge.exe --restore <repositório> <nome> --yes
+
+A restauração devolve os arquivos do checkpoint, mas **não apaga** arquivos criados depois dele. O estado atual é salvo como um novo checkpoint antes de restaurar, então o desfazer também é desfazível.
 
 **Todas as telas do aplicativo são Ratatui**, e os comandos ficam em segundo plano com logs na própria TUI. O sistema ainda pode abrir o navegador para OAuth ou solicitar uma aprovação administrativa. Isso é independente do terminal do aplicativo.
 
@@ -77,11 +180,13 @@ As letras de atalho funcionam com Caps Lock ou Shift. A barra inferior mostra ON
 - **Funnel expõe uma URL pública:** só publique quando entender os riscos; a autenticação deve permanecer ativa.
 - Não remova a proteção Owner/OAuth do DevSpace e evite permitir acesso a todo o disco. O bridge recusa raízes amplas, e o diagnóstico avisa se o `allowedRoots` do DevSpace está amplo demais.
 - A TUI **não simula** políticas de permissões. Controle de leitura/escrita pertence ao servidor MCP, ao usuário do Windows e às permissões do cliente ChatGPT/Claude.
-- Uma resposta HTTP 200 de /healthz confirma rede, **não** uma sessão MCP autenticada nem a permissão de editar arquivos.
+- Uma resposta HTTP 200 de /healthz confirma rede, **não** uma sessão MCP autenticada nem a permissão de editar arquivos. Para saber se o OAuth está ativo, use o teste de proteção (`T`).
 - Qualquer ferramenta que modifica arquivos deve ser revisada antes de usá-la. Confirme pedidos de escrita no cliente.
 - O instalador preserva configurações existentes e nunca publica auth.json, tokens ou senhas no Git. Saídas de instalação são exibidas na TUI apenas na memória; não compartilhe logs que possam conter dados sensíveis.
 - A presença de um endpoint público não significa que ChatGPT ou Claude já tenham sido conectados: a configuração OAuth precisa ser concluída em cada plataforma.
-- A distribuição atual do Windows não é assinada digitalmente. Cada release traz um arquivo `.sha256`; confira com `(Get-FileHash .\DevSpacePCBridge.exe -Algorithm SHA256).Hash` antes de executar.
+- **Aviso de versão:** ao abrir, o aplicativo faz uma consulta anônima à API do GitHub para saber se há release nova. Ele nunca baixa nem substitui nada. Para desligar, defina a variável de ambiente `DEVSPACE_BRIDGE_NO_UPDATE_CHECK=1`.
+- **Copía de logs (`Y`):** a redação é de melhor esforço (hostname `.ts.net`, nome de usuário do Windows e textos parecidos com token). Releia antes de colar em algum lugar público.
+- A distribuição atual do Windows não é assinada digitalmente. As releases a partir da próxima trazem um arquivo `.sha256` (a v0.4.0 não tem; o GitHub mostra o hash dela na página da release); confira com `(Get-FileHash .\DevSpacePCBridge.exe -Algorithm SHA256).Hash` antes de executar.
 
 ## Limitações verificadas
 
@@ -97,9 +202,11 @@ Este programa não incorpora o código do OpenClaude, Codex ou Claude Code. **Ne
 O executável é gerado em target/release/DevSpacePCBridge.exe. Testes e releases são feitos por GitHub Actions em Windows.
 
     DevSpacePCBridge.exe --version
-    DevSpacePCBridge.exe --doctor    # código de saída 0 = saudável, 1 = indisponível
+    DevSpacePCBridge.exe --doctor    # saída 0 = saudável, 1 = indisponível ou pausado, 2 = endpoint aberto sem OAuth
     .\tests\validate.ps1
 
-Os scripts PowerShell em install.ps1 e scripts/ são incorporados ao executável Rust. As preferências da TUI ficam em %APPDATA%\DevSpacePCBridge\bridge-ui.json. Dados anteriores em config.json são preservados.
+O código Rust fica em `src/` (`app` estado e teclas, `ui` desenho, `setup` tarefas e sondas, `tunnel` pausa/retomada, `checkpoint`, `storage`, `redact`, `update`, `checks`, `clock`). Os testes dos scripts ficam em `tests/scripts.tests.ps1`, executam as funções reais dos `.ps1` e não dependem do Pester.
+
+Os scripts PowerShell em install.ps1 e scripts/ são incorporados ao executável Rust e devem conter apenas ASCII (o PowerShell 5.1 lê arquivos sem BOM como ANSI); o `validate.ps1` confere isso. As preferências da TUI ficam em %APPDATA%\DevSpacePCBridge\bridge-ui.json. Dados anteriores em config.json são preservados.
 
 **Licença:** MIT para o código deste projeto. DevSpace e Tailscale são dependências de terceiros com suas próprias licenças.

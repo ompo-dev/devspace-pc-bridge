@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$scripts = @('install.ps1', 'scripts/bridge.ps1', 'scripts/doctor.ps1', 'scripts/uninstall.ps1')
+$scripts = @('install.ps1', 'scripts/bridge.ps1', 'scripts/doctor.ps1', 'scripts/uninstall.ps1', 'scripts/install-component.ps1', 'tests/scripts.tests.ps1')
 foreach ($file in $scripts) {
     $path = Join-Path $repo $file
     $tokens = $null
@@ -22,5 +22,7 @@ if (@($devspaceVersions | Select-Object -Unique).Count -ne 1) {
     throw "A versao do DevSpace difere entre install.ps1 e scripts/doctor.ps1: $($devspaceVersions -join ' / ')"
 }
 Write-Host "DevSpace fixado em $($devspaceVersions[0])"
+& (Join-Path $repo 'tests/scripts.tests.ps1')
 & (Join-Path $repo 'install.ps1') -Check
+& (Join-Path $repo 'scripts/install-component.ps1') -Check
 Write-Host 'Validacao offline concluida.'

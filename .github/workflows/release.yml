@@ -26,15 +26,33 @@ jobs:
         run: cargo test
       - name: Build EXE
         run: cargo build --release
+      - name: Install NSIS compiler
+        shell: pwsh
+        run: choco install nsis --yes --no-progress
+      - name: Build unsigned installer
+        shell: pwsh
+        run: |
+          $makensis = 'C:\Program Files (x86)\NSIS\makensis.exe'
+          if (-not (Test-Path $makensis)) { throw 'NSIS compiler missing' }
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          & $makensis "/DAPP_VERSION=$version" 'packaging/DevSpacePCBridge.nsi'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Generate WinGet manifests
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          ./packaging/generate-winget.ps1 -Version $version -InstallerPath './DevSpacePCBridge-Setup.exe'
+          Compress-Archive -Path 'winget-manifests/manifests' -DestinationPath 'winget-manifests.zip'
       - name: Checksum
         shell: pwsh
         run: |
-          $exe = 'target/release/DevSpacePCBridge.exe'
-          $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
-          "$hash  DevSpacePCBridge.exe" | Set-Content -Encoding ascii "$exe.sha256"
+          foreach ($exe in @('target/release/DevSpacePCBridge.exe', 'DevSpacePCBridge-Setup.exe')) {
+            $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+            "$hash  $(Split-Path -Leaf $exe)" | Set-Content -Encoding ascii "$exe.sha256"
+          }
       - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME target/release/DevSpacePCBridge.exe target/release/DevSpacePCBridge.exe.sha256 --title "DevSpace PC Bridge $env:GITHUB_REF_NAME" --generate-notes --verify-tag
+          gh release create $env:GITHUB_REF_NAME target/release/DevSpacePCBridge.exe target/release/DevSpacePCBridge.exe.sha256 DevSpacePCBridge-Setup.exe DevSpacePCBridge-Setup.exe.sha256 winget-manifests.zip --title "DevSpace PC Bridge $env:GITHUB_REF_NAME" --generate-notes --verify-tag
