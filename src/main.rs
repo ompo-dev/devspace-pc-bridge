@@ -24,6 +24,9 @@ use storage::Settings;
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut app = App::new();
+    if let Some(message) = update::take_outcome() {
+        app.log(message);
+    }
     #[cfg(windows)]
     let desktop_server = {
         let state = Arc::new(remote::RemoteState::new(
@@ -55,10 +58,19 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     };
     app.start_background_checks();
+    #[cfg(windows)]
+    let mut notified_update: Option<String> = None;
     let mut terminal = ratatui::init();
     let result = (|| -> Result<(), Box<dyn Error>> {
         loop {
             app.refresh();
+            #[cfg(windows)]
+            if let (Some(icon), Some(tag)) = (&tray, &app.update) {
+                if notified_update.as_deref() != Some(tag.as_str()) {
+                    icon.notify_update(tag);
+                    notified_update = Some(tag.clone());
+                }
+            }
             if app.quit_requested {
                 break;
             }
@@ -282,6 +294,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         Some("--doctor") => std::process::exit(doctor()),
+        #[cfg(windows)]
+        Some("--apply-update") => std::process::exit(update::apply_update(&args[1..])),
         #[cfg(windows)]
         Some("--desktop-doctor") => std::process::exit(desktop_doctor()),
         #[cfg(windows)]

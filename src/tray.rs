@@ -18,8 +18,8 @@ use windows::{
         System::{Console::GetConsoleWindow, LibraryLoader::GetModuleHandleW},
         UI::{
             Shell::{
-                Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
-                NOTIFYICONDATAW,
+                Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+                NIM_MODIFY, NOTIFYICONDATAW,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
@@ -209,6 +209,34 @@ impl Tray {
             hwnd,
             worker: Some(worker),
         })
+    }
+
+    /// Notify even when the TUI was hidden in the system tray. The notification
+    /// itself does not begin an update: confirmation stays inside the TUI.
+    pub fn notify_update(&self, tag: &str) {
+        let mut data = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: HWND(self.hwnd as *mut c_void),
+            uID: 1,
+            uFlags: NIF_INFO,
+            ..Default::default()
+        };
+        for (dest, ch) in data
+            .szInfoTitle
+            .iter_mut()
+            .zip("Atualizacao disponivel".encode_utf16())
+        {
+            *dest = ch;
+        }
+        for (dest, ch) in data.szInfo.iter_mut().zip(
+            format!("DevSpace PC Bridge {tag}. Abra o aplicativo e pressione U para instalar.")
+                .encode_utf16(),
+        ) {
+            *dest = ch;
+        }
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+        }
     }
 }
 impl Drop for Tray {

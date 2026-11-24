@@ -141,6 +141,8 @@ pub enum TaskEvent {
     Done(Result<(), String>),
     Status(Probe),
     Update(String),
+    UpdateReady(crate::update::PreparedUpdate),
+    UpdateFailed(String),
     CloudflareUrl(String),
     TrayDisable,
     TrayQuit,

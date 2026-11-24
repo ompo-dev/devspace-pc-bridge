@@ -179,7 +179,8 @@ fn home_lines(app: &App) -> Vec<String> {
     }
     if let Some(tag) = &app.update {
         lines.push("".into());
-        lines.push(format!("Nova versão disponível: {tag} (veja Logs)"));
+        lines.push(format!("NOVA VERSAO: {tag} pronta para baixar e instalar"));
+        lines.push(" [U] Atualizar agora (solicita sua confirmacao)".into());
     }
     lines.extend([
         "".into(),
@@ -188,6 +189,7 @@ fn home_lines(app: &App) -> Vec<String> {
         " [C] Copiar MCP   [D] Diagnóstico   [T] Testar HTTPS e OAuth".into(),
         " [P] Pausar publicação   [R] Retomar (PUBLICAR [minutos])".into(),
         " [K] Checkpoint git dos projetos (ponto de restauração)".into(),
+        " [N] Procurar novas atualizacoes no GitHub".into(),
         if app.tray_available {
             " [M] Ocultar terminal na bandeja do Windows".into()
         } else {
@@ -321,6 +323,7 @@ fn page_content(app: &App) -> (&'static str, Text<'static>) {
             " [D] Executar diagnóstico somente leitura".into(),
             " [T] Testar health local, HTTPS e OAuth".into(),
             " [U] Remover a tarefa do bridge (desinstalar)".into(),
+            " [N] Buscar atualizacoes do aplicativo".into(),
             "".into(),
             "INSTALACAO INDIVIDUAL (progresso visivel em Logs)".into(),
             " [1] Git          [2] Node.js     [3] Tailscale".into(),
@@ -380,6 +383,7 @@ fn page_content(app: &App) -> (&'static str, Text<'static>) {
             " 6. Autorize OAuth Owner e teste leitura no chat.".into(),
             "".into(),
             " Início: P pausar | R retomar | K checkpoint | T testar".into(),
+            " Inicio: N buscar atualizacoes | U instalar se disponivel".into(),
             " Logs: Y copiar logs sem dados sensíveis".into(),
             "".into(),
             " Tab: próxima tela    Esc: Início    F1: Ajuda".into(),
@@ -405,6 +409,15 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         height,
     );
     let (title, text) = match app.edit {
+        Edit::Update => (
+            "Confirmar atualizacao do aplicativo",
+            format!(
+                "Versao atual: {}\nNova versao: {}\nBaixaremos EXE + SHA-256 da release oficial.\nA versao antiga fica salva e o bridge sera reiniciado.\nDigite ATUALIZAR para confirmar:\n{}\n\nEnter confirma | Esc cancela",
+                env!("CARGO_PKG_VERSION"),
+                app.update.as_deref().unwrap_or("indisponivel"),
+                app.input
+            ),
+        ),
         Edit::Workspace => (
             "Pasta de projetos",
             format!(

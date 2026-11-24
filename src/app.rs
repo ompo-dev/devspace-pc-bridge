@@ -73,6 +73,7 @@ pub(crate) enum Edit {
     DesktopEnable,
     DesktopPublish,
     InstallComponent(Component),
+    Update,
 }
 
 pub(crate) struct App {
@@ -220,6 +221,21 @@ impl App {
             _ => {}
         }
     }
+    fn start_update(&mut self) {
+        if self.processing {
+            self.log("Uma tarefa ainda esta em andamento. Aguarde antes de atualizar.");
+            return;
+        }
+        let Some(tag) = &self.update else {
+            self.log("Nenhuma atualizacao disponivel. Pressione N para conferir o GitHub.");
+            return;
+        };
+        let tag = tag.clone();
+        self.processing = true;
+        self.page = Page::Logs;
+        self.log(format!("Baixando e verificando atualizacao {tag}..."));
+        update::spawn_prepare(tag, self.sender.clone());
+    }
     pub(crate) fn start_background_checks(&self) {
         setup::watch_status(self.sender.clone());
         update::spawn_check(self.sender.clone());
@@ -256,11 +272,30 @@ impl App {
                 TaskEvent::Line(text) => self.log(text),
                 TaskEvent::Status(probe) => self.apply_status(probe),
                 TaskEvent::Update(tag) => {
-                    self.log(format!(
-                        "Nova versão disponível: {tag}. Baixe em {}",
-                        update::RELEASES_URL
-                    ));
-                    self.update = Some(tag);
+                    if self.update.as_deref() != Some(tag.as_str()) {
+                        self.log(format!("Atualizacao {tag} pronta. Em Inicio, pressione U para confirmar e instalar."));
+                        self.update = Some(tag);
+                    }
+                }
+                TaskEvent::UpdateReady(prepared) => {
+                    self.processing = false;
+                    #[cfg(windows)]
+                    match update::launch_helper(&prepared) {
+                        Ok(()) => {
+                            self.log(format!("{} validada. Encerrando o aplicativo para substituir o EXE; a versao nova abrira automaticamente.", prepared.tag));
+                            self.quit_requested = true;
+                        }
+                        Err(err) => {
+                            let _ = fs::remove_file(&prepared.file);
+                            self.log(format!("Atualizacao nao iniciada: {err}"));
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    self.log("O atualizador de executaveis e exclusivo do Windows.");
+                }
+                TaskEvent::UpdateFailed(err) => {
+                    self.processing = false;
+                    self.log(format!("Nao foi possivel preparar a atualizacao: {err}. A versao instalada permanece intacta."));
                 }
                 TaskEvent::CloudflareUrl(url) => {
                     if self.desktop_tunnel.is_some() {
@@ -356,6 +391,14 @@ impl App {
     pub(crate) fn submit_edit(&mut self) {
         let value = self.input.trim().to_owned();
         match self.edit {
+            Edit::Update => {
+                if value == "ATUALIZAR" {
+                    self.close_edit();
+                    self.start_update();
+                    return;
+                }
+                self.log("Atualizacao cancelada. Nada foi instalado.");
+            }
             Edit::InstallComponent(component) => {
                 if value == format!("INSTALAR {}", component.name().to_ascii_uppercase()) {
                     self.close_edit();
@@ -556,6 +599,13 @@ impl App {
             KeyCode::Char('p') if self.page == Page::Home => self.start(Task::Pause),
             KeyCode::Char('r') if self.page == Page::Home => self.begin_edit(Edit::Resume),
             KeyCode::Char('k') if self.page == Page::Home => self.start(Task::Checkpoint),
+            KeyCode::Char('u') if self.page == Page::Home && self.update.is_some() => {
+                self.begin_edit(Edit::Update)
+            }
+            KeyCode::Char('n') if matches!(self.page, Page::Home | Page::Install) => {
+                self.log("Consultando releases do GitHub...");
+                update::spawn_manual_check(self.sender.clone());
+            }
             KeyCode::Char('y') if self.page == Page::Logs => self.copy_logs(),
             #[cfg(windows)]
             KeyCode::Char('m') if self.page == Page::Home && self.tray_available => {
@@ -659,6 +709,19 @@ mod tests {
         app.begin_edit(Edit::InstallComponent(Component::Cloudflared));
         app.input = "INSTALAR OUTRO".into();
         press(&mut app, KeyCode::Enter);
+        assert!(!app.processing);
+        assert!(app.feedback.contains("cancelada"));
+    }
+    #[test]
+    fn update_requires_confirmation_before_any_download() {
+        let mut app = App::new();
+        app.update = Some("v0.7.0".into());
+        press(&mut app, KeyCode::Char('u'));
+        assert!(app.edit == Edit::Update);
+        assert!(!app.processing);
+        app.input = "atualizar".into();
+        press(&mut app, KeyCode::Enter);
+        assert!(app.edit == Edit::None);
         assert!(!app.processing);
         assert!(app.feedback.contains("cancelada"));
     }

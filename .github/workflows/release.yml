@@ -24,6 +24,14 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test Rust application
         run: cargo test
+      - name: Verify release tag matches Cargo version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -ne 'tag') { throw 'Release requires a version tag vX.Y.Z' }
+          if ($env:GITHUB_REF_NAME -notmatch '^v\d+\.\d+\.\d+$') { throw 'Invalid stable version tag' }
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object { $_.name -eq 'devspace-pc-bridge' }).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag does not match Cargo.toml version $version" }
       - name: Build EXE
         run: cargo build --release
       - name: Install NSIS compiler
