@@ -43,7 +43,7 @@ jobs:
           $makensis = 'C:\Program Files (x86)\NSIS\makensis.exe'
           if (-not (Test-Path $makensis)) { throw 'NSIS compiler missing' }
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          & $makensis "/DAPP_VERSION=$version" 'packaging/DevSpacePCBridge.nsi'
+          & $makensis /NOCD "/DAPP_VERSION=$version" 'packaging/DevSpacePCBridge.nsi'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Generate WinGet manifests
         shell: pwsh

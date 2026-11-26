@@ -132,11 +132,18 @@ Em [Personalizar > Conectores](https://claude.ai/customize/connectors), adicione
 
 Veja o [guia oficial da Anthropic](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp) para as opções por plano e a autenticação.
 
+## Interface guiada
+
+A partir da v0.7, a tela inicial recomenda a próxima etapa conforme as dependências, a pasta e a proteção do servidor. Use **←/→** ou **Tab** para navegar entre seções, **↑/↓** para escolher uma ação e **Enter** para abrir. O assistente separa dependências, pasta, servidor e conexão do chat; manutenção fica em uma etapa própria. O Desktop separa conexão/PIN, aplicativos autorizados, sessão e permissões. **F2** expande os detalhes em qualquer tamanho de terminal; use as setas para ler e Esc para fechar. A tela Atividade acompanha a saída e exibe porcentagem quando o processo reporta progresso real (PgUp/PgDn para histórico; End para acompanhar ao vivo). As confirmações de segurança permanecem obrigatórias.
+
 ## Teclas
 
 | Tecla | Ação |
 |---|---|
-| Tab / Esc | Trocar tela / voltar ao início |
+| ←/→ ou Tab / Esc | Trocar tela / voltar ao início |
+| ↑/↓ e Enter | Selecionar e executar ação |
+| F2 / F1 | Abrir detalhes / ajuda |
+| PgUp/PgDn / End | Navegar histórico da atividade / acompanhar ao vivo |
 | Ctrl+C | Abrir a seção de conexão com chats |
 | Ctrl+S | Instalação/configuração |
 | Ctrl+L | Logs |
@@ -153,7 +160,7 @@ Veja o [guia oficial da Anthropic](https://support.claude.com/en/articles/111751
 | Início: T / D | Testar HTTPS e OAuth / diagnóstico |
 | Logs: Y | Copiar logs sem hostname, usuário e tokens |
 
-As letras de atalho funcionam com Caps Lock ou Shift. A barra inferior mostra o estado, atualizado a cada 30 segundos: ONLINE, OFFLINE, NÃO CONFIGURADO, PAUSADO, ALERTA: SEM OAUTH ou PAUSA NÃO EFETIVA. A tela inicial também traz a disponibilidade da última hora, um checklist (Git, Node.js, DevSpace, Tailscale, servidor local, HTTPS e OAuth) e avisa quando há uma versão nova.
+As letras de atalho anteriores continuam funcionando com Caps Lock ou Shift. O estado da conexão é atualizado a cada 30 segundos. A visão geral mostra a próxima etapa e avisa sobre novas versões; a seção Segurança mostra a disponibilidade e a proteção OAuth. Um servidor com HTTP 200 não é mostrado como protegido sem confirmação de OAuth.
 
 ## Pausa, prazo e proteção
 

@@ -1,7 +1,7 @@
 Unicode true
 !include "MUI2.nsh"
 !ifndef APP_VERSION
-  !define APP_VERSION "0.6.0"
+  !define APP_VERSION "0.7.0"
 !endif
 
 Name "DevSpace PC Bridge"

@@ -25,7 +25,7 @@ const MAX_LOG_LINES: usize = 350;
 /// Longest timed exposure the prompt accepts: one day.
 const MAX_EXPOSE_MINUTES: u32 = 1440;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Page {
     Home,
     Connect,
@@ -38,10 +38,10 @@ pub(crate) enum Page {
 impl Page {
     pub(crate) const ALL: [Self; 7] = [
         Self::Home,
-        Self::Connect,
         Self::Install,
-        Self::Security,
+        Self::Connect,
         Self::Desktop,
+        Self::Security,
         Self::Logs,
         Self::Help,
     ];
@@ -52,11 +52,11 @@ impl Page {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Home => "Início",
-            Self::Connect => "Conectar chats",
+            Self::Connect => "Conectar",
             Self::Install => "Configurar",
             Self::Security => "Segurança",
-            Self::Desktop => "Desktop remoto",
-            Self::Logs => "Logs",
+            Self::Desktop => "Desktop",
+            Self::Logs => "Atividade",
             Self::Help => "Ajuda",
         }
     }
@@ -79,6 +79,15 @@ pub(crate) enum Edit {
 pub(crate) struct App {
     pub(crate) config: Settings,
     pub(crate) page: Page,
+    pub(crate) selection: usize,
+    pub(crate) info_open: bool,
+    pub(crate) info_offset: u16,
+    pub(crate) setup_step: usize,
+    pub(crate) desktop_step: usize,
+    pub(crate) task_title: String,
+    pub(crate) task_progress: Option<u16>,
+    pub(crate) task_result: Option<bool>,
+    pub(crate) task_return: Page,
     pub(crate) edit: Edit,
     pub(crate) input: String,
     pub(crate) feedback: String,
@@ -140,6 +149,15 @@ impl App {
         Self {
             config: Settings::load(),
             page: Page::Home,
+            selection: 0,
+            info_open: false,
+            info_offset: 0,
+            setup_step: 0,
+            desktop_step: 0,
+            task_title: String::new(),
+            task_progress: None,
+            task_result: None,
+            task_return: Page::Home,
             edit: Edit::None,
             input: String::new(),
             feedback: "Use Tab para navegar. Configure e conecte seu chat habitual.".into(),
@@ -231,8 +249,13 @@ impl App {
             return;
         };
         let tag = tag.clone();
+        self.task_title = format!("Atualização {tag}");
+        self.task_progress = Some(0);
+        self.task_result = None;
+        self.task_return = self.page;
         self.processing = true;
         self.page = Page::Logs;
+        self.selection = 0;
         self.log(format!("Baixando e verificando atualizacao {tag}..."));
         update::spawn_prepare(tag, self.sender.clone());
     }
@@ -242,12 +265,20 @@ impl App {
     }
     pub(crate) fn log(&mut self, message: impl Into<String>) {
         let message = message.into();
+        if self.processing {
+            if let Some(percent) = message
+                .strip_prefix('[')
+                .and_then(|s| s.split_once("%]"))
+                .and_then(|(s, _)| s.parse::<u16>().ok())
+            {
+                self.task_progress = Some(percent.min(100));
+            }
+        }
         self.feedback = message.clone();
         self.logs.push_back(message);
         while self.logs.len() > MAX_LOG_LINES {
             self.logs.pop_front();
         }
-        self.logs_offset = u16::MAX;
     }
     fn save(&mut self) {
         if let Err(e) = self.config.save() {
@@ -260,8 +291,14 @@ impl App {
             return;
         }
         self.processing = true;
+        self.task_title = task.label().to_owned();
+        self.task_progress = None;
+        self.task_result = None;
+        self.task_return = self.page;
         self.process_pid = None;
         self.page = Page::Logs;
+        self.selection = 0;
+        self.logs_offset = u16::MAX;
         self.log(format!("Iniciando {}...", task.label()));
         setup::start(task, self.config.workspace.clone(), self.sender.clone());
     }
@@ -279,13 +316,16 @@ impl App {
                 }
                 TaskEvent::UpdateReady(prepared) => {
                     self.processing = false;
+                    self.task_progress = Some(100);
                     #[cfg(windows)]
                     match update::launch_helper(&prepared) {
                         Ok(()) => {
+                            self.task_result = Some(true);
                             self.log(format!("{} validada. Encerrando o aplicativo para substituir o EXE; a versao nova abrira automaticamente.", prepared.tag));
                             self.quit_requested = true;
                         }
                         Err(err) => {
+                            self.task_result = Some(false);
                             let _ = fs::remove_file(&prepared.file);
                             self.log(format!("Atualizacao nao iniciada: {err}"));
                         }
@@ -295,6 +335,7 @@ impl App {
                 }
                 TaskEvent::UpdateFailed(err) => {
                     self.processing = false;
+                    self.task_result = Some(false);
                     self.log(format!("Nao foi possivel preparar a atualizacao: {err}. A versao instalada permanece intacta."));
                 }
                 TaskEvent::CloudflareUrl(url) => {
@@ -326,6 +367,10 @@ impl App {
                 TaskEvent::Done(result) => {
                     self.processing = false;
                     self.process_pid = None;
+                    self.task_result = Some(result.is_ok());
+                    if result.is_ok() {
+                        self.task_progress = Some(100);
+                    }
                     match result {
                         Ok(()) => self.log("Operação concluída."),
                         Err(err) => self.log(format!("Falha: {err}")),
@@ -538,6 +583,42 @@ impl App {
             self.log("Aguarde o início do processo para cancelar.");
         }
     }
+    pub(crate) fn navigate(&mut self, page: Page) {
+        self.page = page;
+        self.selection = 0;
+        self.info_open = false;
+        self.info_offset = 0;
+    }
+
+    fn activate_selected(&mut self) -> bool {
+        use crate::navigation::ActionKind;
+        let actions = crate::navigation::actions(self);
+        let Some(action) = actions.get(self.selection.min(actions.len().saturating_sub(1))) else {
+            return false;
+        };
+        match action.kind {
+            ActionKind::Key(c) => self.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+            ActionKind::Page(page) => {
+                self.navigate(page);
+                false
+            }
+            ActionKind::Setup(step) => {
+                self.setup_step = step;
+                self.navigate(Page::Install);
+                false
+            }
+            ActionKind::Desktop(step) => {
+                self.desktop_step = step;
+                self.selection = 0;
+                self.info_offset = 0;
+                false
+            }
+            ActionKind::Return => {
+                self.navigate(self.task_return);
+                false
+            }
+        }
+    }
     pub(crate) fn key(&mut self, key: KeyEvent) -> bool {
         // Shortcuts ignore case so Caps Lock/Shift do not break them; text entry keeps it.
         let code = match key.code {
@@ -554,9 +635,9 @@ impl App {
                     }
                 }
                 KeyCode::Char('x') => self.cancel_task(),
-                KeyCode::Char('l') => self.page = Page::Logs,
-                KeyCode::Char('s') => self.page = Page::Install,
-                KeyCode::Char('c') => self.page = Page::Connect,
+                KeyCode::Char('l') => self.navigate(Page::Logs),
+                KeyCode::Char('s') => self.navigate(Page::Install),
+                KeyCode::Char('c') => self.navigate(Page::Connect),
                 _ => {}
             }
             return false;
@@ -578,10 +659,39 @@ impl App {
             }
             return false;
         }
+        if self.info_open {
+            match code {
+                KeyCode::F(2) | KeyCode::Esc | KeyCode::Enter => {
+                    self.info_open = false;
+                    self.info_offset = 0;
+                }
+                KeyCode::Up => self.info_offset = self.info_offset.saturating_sub(1),
+                KeyCode::Down => self.info_offset = (self.info_offset + 1).min(1000),
+                KeyCode::PageUp => self.info_offset = self.info_offset.saturating_sub(8),
+                KeyCode::PageDown => self.info_offset = (self.info_offset + 8).min(1000),
+                KeyCode::Home => self.info_offset = 0,
+                _ => {}
+            }
+            return false;
+        }
         match code {
-            KeyCode::Tab => self.page = self.page.next(),
-            KeyCode::Esc => self.page = Page::Home,
-            KeyCode::F(1) => self.page = Page::Help,
+            KeyCode::Tab | KeyCode::Right => self.navigate(self.page.next()),
+            KeyCode::BackTab | KeyCode::Left => {
+                let i = Page::ALL.iter().position(|p| *p == self.page).unwrap_or(0);
+                self.navigate(Page::ALL[(i + Page::ALL.len() - 1) % Page::ALL.len()]);
+            }
+            KeyCode::Esc => self.navigate(Page::Home),
+            KeyCode::F(1) => self.navigate(Page::Help),
+            KeyCode::F(2) if self.page != Page::Logs => {
+                self.info_open = true;
+                self.info_offset = 0;
+            }
+            KeyCode::Enter => return self.activate_selected(),
+            KeyCode::Up => self.selection = self.selection.saturating_sub(1),
+            KeyCode::Down => {
+                self.selection = (self.selection + 1)
+                    .min(crate::navigation::actions(self).len().saturating_sub(1))
+            }
             KeyCode::Char('1') if self.page == Page::Connect => self.select(ChatClient::ChatGpt),
             KeyCode::Char('2') if self.page == Page::Connect => self.select(ChatClient::Claude),
             KeyCode::Char('c')
@@ -596,9 +706,15 @@ impl App {
                     Err(e) => e,
                 });
             }
-            KeyCode::Char('p') if self.page == Page::Home => self.start(Task::Pause),
-            KeyCode::Char('r') if self.page == Page::Home => self.begin_edit(Edit::Resume),
-            KeyCode::Char('k') if self.page == Page::Home => self.start(Task::Checkpoint),
+            KeyCode::Char('p') if matches!(self.page, Page::Home | Page::Security) => {
+                self.start(Task::Pause)
+            }
+            KeyCode::Char('r') if matches!(self.page, Page::Home | Page::Security) => {
+                self.begin_edit(Edit::Resume)
+            }
+            KeyCode::Char('k') if matches!(self.page, Page::Home | Page::Security) => {
+                self.start(Task::Checkpoint)
+            }
             KeyCode::Char('u') if self.page == Page::Home && self.update.is_some() => {
                 self.begin_edit(Edit::Update)
             }
@@ -647,17 +763,30 @@ impl App {
             KeyCode::Char('r') if self.page == Page::Install => self.begin_edit(Edit::Workspace),
             KeyCode::Char('i') if self.page == Page::Install => self.begin_edit(Edit::Publish),
             KeyCode::Char('u') if self.page == Page::Install => self.begin_edit(Edit::Uninstall),
-            KeyCode::Char('d') if matches!(self.page, Page::Install | Page::Home) => {
+            KeyCode::Char('d')
+                if matches!(self.page, Page::Install | Page::Home | Page::Security) =>
+            {
                 self.start(Task::Doctor)
             }
-            KeyCode::Char('t') if matches!(self.page, Page::Install | Page::Home) => {
+            KeyCode::Char('t')
+                if matches!(self.page, Page::Install | Page::Home | Page::Security) =>
+            {
                 self.start(Task::CheckHealth)
             }
-            KeyCode::Up if self.page == Page::Logs => {
-                self.logs_offset = self.logs_offset.saturating_sub(1)
+            KeyCode::PageUp if self.page == Page::Logs => {
+                self.logs_offset = if self.logs_offset == u16::MAX {
+                    8
+                } else {
+                    self.logs_offset.saturating_add(8).min(u16::MAX - 1)
+                };
             }
-            KeyCode::Down if self.page == Page::Logs => {
-                self.logs_offset = self.logs_offset.saturating_add(1)
+            KeyCode::PageDown if self.page == Page::Logs => {
+                if self.logs_offset != u16::MAX {
+                    self.logs_offset = self.logs_offset.saturating_sub(8);
+                    if self.logs_offset == 0 {
+                        self.logs_offset = u16::MAX;
+                    }
+                }
             }
             KeyCode::End if self.page == Page::Logs => self.logs_offset = u16::MAX,
             _ => {}

@@ -4,6 +4,7 @@ mod checks;
 mod clock;
 mod cloudflare;
 mod desktop;
+mod navigation;
 mod redact;
 mod remote;
 mod setup;
